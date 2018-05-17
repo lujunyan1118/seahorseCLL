@@ -1,0 +1,162 @@
+---
+title: 'Section 1: Comparison between normal B cell and CLL cells'
+author: "Junyan Lu"
+date: "`r doc_date()`"
+output:
+  BiocStyle::html_document
+---
+
+# Comparison between normal B cell and CLL cells
+
+```{r, message=FALSE, include=!exists(".standalone"), eval=!exists(".standalone"),echo=FALSE}
+library(seahorseCLL)
+library(BloodCancerMultiOmics2017)
+library(SummarizedExperiment)
+library(ggbeeswarm)
+library(xtable)
+library(cowplot)
+library(gridExtra)
+library(tidyverse)
+```
+
+```{r echo=FALSE}
+plotDir = ifelse(exists(".standalone"), "", "section01/")
+if(plotDir!="") if(!file.exists(plotDir)) dir.create(plotDir)
+options(stringsAsFactors=FALSE)
+```
+
+
+## A global view of bioenergetic features in CLL and normal B-cells
+
+Load data
+```{r}
+data("seaBcell", "seaOri", "patmeta")
+```
+
+Combine the two data sets to one matrix
+```{r}
+stopifnot(rownames(seaBcell) == rownames(seaOri))
+seaOri$diagnosis <- patmeta[colnames(seaOri),]$Diagnosis
+seaOri <- seaOri[,seaOri$diagnosis == "CLL"] # choose CLL samples
+
+seaMat <- cbind(assays(seaBcell)$seaMedian, assays(seaOri)$seaMedian)
+seaBatch <- rbind(colData(seaBcell)[,"dateMST", drop= FALSE], colData(seaOri)[,"dateMST", drop = FALSE])
+
+#remove samples that contain NA values
+seaMat <- seaMat[,complete.cases(t(seaMat))]
+```
+
+Principal component analysis
+```{r}
+resPC <- prcomp(t(seaMat), center = TRUE, scale. = TRUE)
+varExp <- resPC$sdev^2/sum(resPC$sdev^2)
+```
+
+Plot the first two principal components
+```{r, fig.width=5, fig.height=5}
+#define color
+colorList <- c(`B cell` = "#FF3030", CLL= "#1E90FF")
+
+plotTab <- data.frame(resPC$x[,c(1,2)])
+plotTab$type <- c(rep("B cell", ncol(seaBcell)), rep("CLL", nrow(plotTab)- ncol(seaBcell))) #10 normal b cell samples
+
+pcaPlot <- ggplot(plotTab, aes(x=PC1, y=PC2, color = type)) + geom_point(size=3) + 
+  xlab(sprintf("PC1 (%2.1f%s)",varExp[1]*100,"%")) + ylab(sprintf("PC2 (%2.1f%s)", varExp[2]*100, "%")) + 
+  theme_bw() + theme(legend.position = c(0.9,0.9), legend.title = element_blank(), 
+                     legend.background = element_rect(color="grey"),
+                     axis.text = element_text(size =18),
+                     axis.title = element_text(size = 20)) +
+  scale_color_manual(values = colorList) + coord_cartesian(xlim = c(-5.5,5.5), ylim = c(-5.5,5.5))
+pcaPlot
+```
+
+## Associations between cell type and individual metabolic features
+
+Prepare table for hypothesis test
+```{r}
+seaMat <- data.frame(cbind(assays(seaBcell)$seaMedian, assays(seaOri)$seaMedian)) %>% rownames_to_column(var = "measure")
+seaTab <- gather(seaMat, key = "patientID", value = "value", -measure) %>% 
+  mutate(type = ifelse(substr(patientID, 1, 1) == "K", "B cell", "CLL")) %>% mutate(type = factor(type)) %>%
+  mutate(batch = as.factor(seaBatch[patientID, ]))
+```
+
+t-test for each measurment
+```{r}
+pTab <- group_by(seaTab, measure) %>% do((function(x) {
+  res <- t.test(value ~ type, x, equal.var = TRUE)
+  data.frame(p = res$p.value,
+             diff = res$estimate[[2]] - res$estimate[[1]])
+}) (.))
+pTab$p.adj <- p.adjust(pTab$p, method = "BH")
+```
+
+ANOVA-test for each measurment (accounting for batch effect)
+```{r}
+pTab.aov <- group_by(seaTab, measure) %>% do((function(x) {
+  res <- summary(aov(value ~ type + batch, x))
+  data.frame(p = res[[1]][["Pr(>F)"]][1])
+}) (.))
+pTab.aov$p.adj <- p.adjust(pTab.aov$p, method = "BH")
+```
+
+Expor the table to LaTex format using xtable
+```{r, results=FALSE}
+expTab <- pTab %>% ungroup() %>% mutate(measure = gsub("\\."," ",measure)) %>%
+  rename("Seahorse measurement" = measure, "Difference of mean" = diff) %>%
+  mutate(p = pTab.aov$p,  `adjusted p` = pTab.aov$p.adj) %>%
+  select(-p.adj)
+expTab[expTab$`Seahorse measurement` == "ECAR OCR ratio", 1] <- "ECAR/OCR"
+fileConn <- file("section01/tTest_BcellVSCLL.tex")
+writeLines(print(xtable(expTab, digits = 3, 
+             caption = "ANOVA test results of energy metabolic measurements between CLL cells and normal B cells "), 
+      include.rownames=FALSE,
+      caption.placement = "top"), fileConn)
+close(fileConn)
+```
+
+Beeswarms plot for select measurement
+```{r, warning=FALSE}
+measureList <- c("basal.respiration","glycolysis","ATP.production","glycolytic.capacity","maximal.respiration","glycolytic.reserve")
+gList <- lapply(measureList, function(seaName) {
+  
+  plotTab <- filter(seaTab, measure == seaName, !is.na(value))
+  pval <- filter(pTab.aov, measure == seaName )$p
+  
+    
+  #unit y (add unit to y axis, based on the type of measurement)
+  if (seaName %in% c("basal.respiration","ATP.production","maximal.respiration")) {
+    yLab <- "OCR (pMol/min)"
+  } else yLab <- "ECAR (pMol/min)"
+    
+  #replace the "." in the mearement name with space
+  seaName <- gsub("\\."," ",seaName)
+
+  
+  #plot title
+  #plotTitle <- sprintf("p value = %s", format(pval, digits = 2, scientific = TRUE))
+    plotTitle <- paste(sprintf("'%s (p = '~",seaName),
+                     sciPretty(pval, digits = 2),"*')'")
+  ggplot(plotTab, aes(x=type, y = value)) + 
+       stat_boxplot(geom = "errorbar", width = 0.3) +
+       geom_boxplot(outlier.shape = NA, col="black", width=0.4) + 
+       geom_beeswarm(cex=2, size =0.5, aes(col = type)) + theme_classic() +
+       xlab("") + ylab(yLab) + ggtitle(parse(text = plotTitle)) +
+      theme(axis.line.x = element_blank(), axis.ticks.x = element_blank(),
+             axis.title.y = element_text(size=10, face="bold"),
+             axis.text = element_text(size=11),
+             plot.title = element_text(size = 12, hjust=0.5),
+             legend.position = "none",
+             axis.text.x = element_text(face="bold",size=12)) +
+    scale_color_manual(values = colorList)
+  
+})
+beePlot <- grid.arrange(grobs = gList, ncol=2)
+```
+
+
+Combine the PCA plot and beeswarm plots (Figure 1)
+```{r normalVScll, fig.path=plotDir, dev=c("png", "pdf"), fig.width=12, fig.height=6}
+plot_grid(pcaPlot, beePlot, labels= c("A","B"), rel_widths = c(1,1))
+```
+
+

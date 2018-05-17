@@ -1,0 +1,453 @@
+---
+title: 'Section 3: Associations between drug response phenotype and energy metabolism of CLL'
+author: "Junyan Lu"
+date: "`r doc_date()`"
+output:
+  BiocStyle::html_document
+---
+
+# Associations between drug response phenotype and energy metabolism of CLL 
+```{r, message=FALSE, include=!exists(".standalone"), eval=!exists(".standalone"), echo=FALSE}
+library(seahorseCLL)
+library(BloodCancerMultiOmics2017)
+library(SummarizedExperiment)
+library(RColorBrewer)
+library(grid)
+library(gridExtra)
+library(cowplot)
+library(robustbase)
+library(tidyverse)
+```
+
+```{r echo=FALSE}
+plotDir = ifelse(exists(".standalone"), "", "section03/")
+if(plotDir!="") if(!file.exists(plotDir)) dir.create(plotDir)
+options(stringsAsFactors=FALSE)
+```
+
+## Data pre-processing
+
+Load data set
+```{r}
+data("lpdAll","drugs", "patmeta", "seaCombat", "conctab")
+```
+
+Sample subsetting
+```{r}
+#get drug response data for CLL samples only
+lpdCLL <- lpdAll[fData(lpdAll)$type == "viab",pData(lpdAll)$Diagnosis == "CLL"]
+
+#get overlapped samples
+sampleOverlap <- intersect(colnames(lpdCLL), colnames(seaCombat))
+seaSub <- seaCombat[,sampleOverlap]
+lpdCLL <- lpdCLL[,sampleOverlap]
+```
+
+How many overlapped samples?
+```{r}
+length(sampleOverlap)
+```
+
+Remove bad drugs. Bortezomib lost its activity during storage. The data for this drug and NSC 74859 were discarded from further analysis.
+```{r}
+badrugs = c("D_008", "D_025") 
+lpdCLL <- lpdCLL[!fData(lpdCLL)$id %in% badrugs,]
+```
+
+
+Get drug response data
+```{r}
+# get drug responsee data
+get.drugresp <- function(lpd) {
+  drugresp = t(exprs(lpd[fData(lpd)$type == 'viab'])) %>%
+    tbl_df %>% dplyr::select(-ends_with(":5")) %>%
+    dplyr::mutate(ID = colnames(lpd)) %>%
+    tidyr::gather(drugconc, viab, -ID) %>%
+    dplyr::mutate(drug = drugs[substring(drugconc, 1, 5), "name"],
+           conc = sub("^D_([0-9]+_)", "", drugconc)) %>%
+    dplyr::mutate(conc = as.integer(gsub("D_CHK_", "", conc)))
+  
+  drugresp
+}
+drugresp <- get.drugresp(lpdCLL)
+```
+
+Use median polish to summarise drug response of the five concentrations
+```{r, warning=FALSE, message=FALSE, results=FALSE}
+get.medp <- function(drugresp) {
+  tab = drugresp %>% group_by(drug, conc) %>% 
+    do(data.frame(v = .$viab, ID = .$ID)) %>% spread(ID, v)
+  
+  med.p = lapply(unique(tab$drug), function(n) {
+    tb = filter(tab, drug == n) %>% ungroup() %>% select(-(drug:conc)) %>% 
+      as.matrix %>% `rownames<-`(1:5)
+    mdp = stats::medpolish(tb)
+    df = as.data.frame(mdp$col) + mdp$overall
+    colnames(df) <- n
+    df
+  }) %>% do.call(cbind,.)
+  
+  medp.viab = tbl_df(med.p) %>% mutate(ID = rownames(med.p)) %>%
+    gather(drug, viab, -ID) 
+  medp.viab
+}
+drugresp.mp <- get.medp(drugresp)
+```
+
+## Association test between drug response and seahorse measurements
+
+### Function to calculate correlation given a drug table and seahorse table
+```{r}
+corTest <- function(patID, viab, seaTable, ighv = NULL) {
+  viab <- setNames(viab, patID)
+  
+  corTab <- lapply(seq(1,nrow(seaTable)), function(i) {
+    seaName <- rownames(seaTable)[i]
+    
+    #remove NA samples in Seahorse entry
+    seaVal <- seaTable[seaName,]
+    seaVal <- seaVal[!is.na(seaVal)]
+    
+    
+    #get useable sample list
+    if (!is.null(ighv)) {
+      patList <- intersect(names(ighv), intersect(patID, names(seaVal)))
+      ighvVal <- ighv[patList]
+    } else {
+      patList <- intersect(patID, names(seaVal))
+    }
+    
+    #subset drug value
+    drugVal <- viab[patList]
+    seaVal <- seaVal[patList]
+    
+    #correlation test, block for IGHV
+    if (!is.null(ighv)) {
+      res <- summary(lm(seaVal ~ drugVal + ighvVal))
+      data.frame(seahorse = seaName, 
+               p = res$coefficients[2,4], 
+               coef =  sqrt(res$r.squared) * sign(res$coefficients[2,3]),
+               stringsAsFactors = FALSE)
+    } else {
+      res <- cor.test(seaVal, drugVal, method = "pearson")
+      data.frame(seahorse = seaName, 
+         p = res$p.value, 
+         coef =  res$estimate[[1]],
+         stringsAsFactors = FALSE)
+      
+    }
+  }) %>% do.call(rbind,.)
+}
+```
+
+### Correlation test without blocking for IGHV
+
+Calculate correlation coefficient and p values
+```{r}
+seaTest <- assays(seaSub)$seaMedian
+resTab.noBlock <- group_by(drugresp.mp, drug) %>% do(corTest(.$ID, .$viab, seaTest, ighv = NULL)) %>% ungroup() %>%
+  mutate(p.adj = p.adjust(p, method = "BH"))
+```
+
+How many significant associations at 10% FDR?
+```{r}
+resTab.noBlock %>% filter(p.adj <= 0.1) %>% nrow()
+```
+
+How many drugs show at least one significant assocations?
+```{r}
+resTab.noBlock %>% filter(p.adj <= 0.1) %>% filter(!duplicated(drug)) %>% nrow()
+```
+
+
+### Correlation test with blocking for IGHV
+Calculate correlation coefficient and p values
+```{r}
+#get IGHV stauts
+ighv <- exprs(lpdAll)["IGHV Uppsala U/M",]
+ighv <-ighv[!is.na(ighv)]
+
+
+resTab <- group_by(drugresp.mp, drug) %>% do(corTest(.$ID, .$viab, seaTest, ighv = ighv)) %>% ungroup() %>%
+  mutate(p.adj = p.adjust(p, method = "BH"))
+```
+
+How many significant associations at 10% FDR?
+```{r}
+resTab %>% filter(p.adj <= 0.1) %>% nrow()
+```
+
+How many drugs show at least one significant assocations?
+```{r}
+resTab %>% filter(p.adj <= 0.1) %>% filter(!duplicated(drug)) %>% nrow()
+```
+
+
+## Plot of distribution of correlations coefficient
+
+```{r, seaVSdrug_coef, fig.path=plotDir, dev=c("png", "pdf"), fig.height=5,fig.width=8}
+ggplot(resTab.noBlock, aes(x=coef)) + geom_histogram(binwidth = 0.05, col = "darkblue", fill = "lightblue") + theme_classic() + 
+  theme(panel.grid = element_blank(), axis.title = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size=12), plot.title = element_text(size=15, hjust =.5, face = "bold")) + xlab("Pearson correlation coefficient")
+```
+
+
+## P-value scatter plot
+
+### Correlation test with blocking for IGHV status (Figure 4)
+
+Preocess table for plotting
+```{r}
+atLeastOne <- group_by(resTab, drug) %>% summarise(sigNum = sum(p.adj <= 0.1)) %>% filter(sigNum > 0)
+plotTab <- filter(resTab, drug %in% atLeastOne$drug) %>% 
+  mutate(seahorse = ifelse(p.adj > 0.1, "not significant", seahorse))
+
+#change mearement name 
+plotTab$seahorse <- sapply(plotTab$seahorse, function(x) {gsub("\\."," ",x)})
+
+#define the group of seahorse measurement
+measureType <- tibble(measure = rownames(seaCombat), type = rowData(seaCombat)$type) %>% 
+  mutate(type = ifelse(type %in% c("ECAR.OCR","GST","ECAR"), "glycolysis", "respiration"))
+
+#generate color list separately for each group
+glyList <- setNames(tail(brewer.pal(9,"OrRd"),nrow(filter(measureType, type =="glycolysis"))),
+                    filter(measureType, type =="glycolysis")$measure)
+resList <- setNames(tail(brewer.pal(9,"GnBu"),nrow(filter(measureType, type =="respiration"))),
+                    filter(measureType, type =="respiration")$measure)
+nosig <- c("not significant" = "grey80")
+colList <- c(glyList, resList, nosig)
+names(colList) <- sapply(names(colList), function(x) {gsub("\\."," ",x)})
+
+#order the factor for seahorse measurment
+plotTab$seahorse <- factor(plotTab$seahorse, levels = names(colList))
+
+#add the direction of correlation
+plotTab <- mutate(plotTab, Direction = ifelse(coef > 0, "positive", "negative"))
+
+#get the cutoff value
+fdrCut <- max(filter(plotTab, seahorse != "not significant")$p)
+```
+
+Plot
+```{r seaVSdrug_Manhattan, fig.path=plotDir, dev=c("png", "pdf"), fig.height=6,fig.width=10}
+p <- ggplot(data = plotTab, aes(x = drug,y=-log10(p), fill = seahorse, color = seahorse, shape = Direction)) + 
+  geom_point(size=4) + scale_fill_manual(values = colList) + scale_color_manual(values = colList) +
+  geom_hline(yintercept = -log10(fdrCut), linetype="dotted") + 
+  ylab(expression(-log[10]*'('*p~value*')')) + xlab("") + theme_bw() + 
+  scale_shape_manual(values = c(positive = 24, negative = 25)) +
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust = 1,size=15),
+        axis.text.y = element_text(size=15),
+        axis.title = element_text(size =15, face = "bold")) +
+  guides(fill="none", color = guide_legend(title = "Measurement"))
+
+plot(p)
+```
+
+### Correlation test without blocking for IGHV status (Supplementary Figure)
+
+Preocess table for plotting
+```{r}
+atLeastOne <- group_by(resTab.noBlock, drug) %>% summarise(sigNum = sum(p.adj <= 0.1)) %>% filter(sigNum > 0)
+plotTab <- filter(resTab.noBlock, drug %in% atLeastOne$drug) %>% 
+  mutate(seahorse = ifelse(p.adj > 0.1, "not significant", seahorse))
+
+#change mearement name 
+plotTab$seahorse <- sapply(plotTab$seahorse, function(x) {gsub("\\."," ",x)})
+
+#define the group of seahorse measurement
+measureType <- tibble(measure = rownames(seaCombat), type = rowData(seaCombat)$type) %>% 
+  mutate(type = ifelse(type %in% c("ECAR.OCR","GST","ECAR"), "glycolysis", "respiration"))
+
+#generate color list separately for each group
+glyList <- setNames(tail(brewer.pal(9,"OrRd"),nrow(filter(measureType, type =="glycolysis"))),
+                    filter(measureType, type =="glycolysis")$measure)
+resList <- setNames(tail(brewer.pal(9,"GnBu"),nrow(filter(measureType, type =="respiration"))),
+                    filter(measureType, type =="respiration")$measure)
+
+nosig <- c("not significant" = "grey80")
+colList <- c(glyList, resList, nosig)
+names(colList) <- sapply(names(colList), function(x) {gsub("\\."," ",x)})
+
+#order the factor for seahorse measurment
+plotTab$seahorse <- factor(plotTab$seahorse, levels = names(colList))
+
+#add direction iformation
+plotTab <- mutate(plotTab, Direction = ifelse(coef > 0, "positive", "negative"))
+
+#get the cutoff value
+fdrCut <- max(filter(plotTab, seahorse != "not significant")$p)
+```
+
+
+```{r seaVSdrug_Manhattan_noBlocking, fig.path=plotDir, dev=c("png", "pdf"), fig.height=6,fig.width=12}
+p <- ggplot(data = plotTab, aes(x = drug,y=-log10(p), fill = seahorse, color = seahorse, shape = Direction)) + 
+  geom_point(size=4) + scale_fill_manual(values = colList) + scale_color_manual(values = colList) +
+  geom_hline(yintercept = -log10(fdrCut), linetype="dotted") + 
+  ylab(expression(-log[10]*'('*p~value*')')) + xlab("") + theme_bw() + 
+  scale_shape_manual(values = c(positive = 24, negative = 25)) +
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust = 1,size=15),
+        axis.text.y = element_text(size=15),
+        axis.title = element_text(size =15, face = "bold")) +
+  guides(fill="none", color = guide_legend(title = "Measurement"))
+
+plot(p)
+```
+
+## Scatter plot of associations
+
+Scatter plot for all significant pairs
+```{r}
+resTab.sig <- filter(resTab, p.adj <= 0.1)
+
+scatterList <- lapply(seq(1,nrow(resTab.sig)), function(i){
+  seaName <- resTab.sig[i,]$seahorse
+  p <- resTab.sig[i,]$p
+  coef <- format(resTab.sig[i,]$coef,digits = 2)
+  drugName <- resTab.sig[i,]$drug
+  
+  #remove NA samples in Seahorse entry
+  seaVal <- seaTest[seaName,]
+  seaVal <- seaVal[!is.na(seaVal)]
+  
+  #get useable sample list
+  patList <- intersect(filter(drugresp.mp, drug == drugName)$ID, names(seaVal))
+  
+  #set y label
+  if (seaName %in% c("ECAR.OCR.ration")) {
+    xLab = "ECAR/OCR"
+  } else if (seaName %in% c("maximal.respiration","spare.respiratory.capacity","basal.respiration",
+                            "ATP.production")) {
+    xLab = "OCR (pMol/min)" } else xLab = "ECAR (pMol/min)"
+  
+  #format seahorse measurement name
+  seaName.new <- ifelse(seaName == "ECAR.OCR.ratio", "ECAR/OCR", gsub("\\."," ",seaName))
+  
+  #prepare title
+  plotTitle <- sprintf("%s ~ %s", drugName, seaName.new)
+  
+  #prepare plot table
+  plotTab <- filter(drugresp.mp, drug == drugName, ID %in% patList) %>%
+    mutate(sea=seaVal[ID])
+  
+  #prepare correlation test annotations
+  annoText <- paste("'coefficient ='~",coef,"*","', p ='~",sciPretty(p,digits=2))
+  limX <- max(plotTab$sea) + 2
+  midX <- max(plotTab$sea)/2
+  ggplot(plotTab, aes(x=sea,y=100*viab)) + geom_point(size=1) + 
+    geom_smooth(method = "lmrob", se= FALSE) +
+    xlab(xLab) + ylab("% viability after drug treatment") +
+    theme_bw() + ggtitle(plotTitle) + coord_cartesian(xlim = c(-2,limX)) +
+    annotate("text", x = midX, y = Inf, label = annoText, 
+             vjust=1, hjust=0.5, size = 5, parse = TRUE, col= "darkred") +
+    theme(panel.grid = element_blank(),
+          axis.title = element_text(size=13, face="bold"),
+          axis.text = element_text(size=12),
+          plot.title = element_text(face="bold", hjust=0.5, size = 15 ),
+          legend.position = "none",
+          axis.title.x = element_text(face="bold"),
+          plot.margin = unit(c(0.5,0.5,0.5,0.5), "cm"))
+})
+
+names(scatterList) <- paste0(resTab.sig$seahorse, "_", resTab.sig$drug)
+```
+
+
+A figure of selected drugs (Figure 5)
+```{r seaVSdrug_Scatter, fig.path=plotDir, dev=c("png", "pdf"), fig.height=8, fig.width=8}
+plot_grid(scatterList$glycolysis_rotenone, 
+          scatterList$glycolysis_venetoclax,
+          scatterList$glycolytic.capacity_orlistat,
+          scatterList$`ECAR_KX2-391`,ncol=2)
+```
+
+
+## Association test for individual concentrations
+
+Association tests for each concentration
+```{r}
+corRes_conc <- group_by(drugresp, drug, conc) %>% do(corTest(.$ID, .$viab, seaTest, ighv = NULL)) %>% ungroup() %>%
+  mutate(p.adj = p.adjust(p, method = "BH"))
+```
+
+Prepare plot tab
+```{r}
+drugList <- unique(filter(corRes_conc, p.adj < 0.1)$drug)
+seaList <- unique(filter(corRes_conc, p.adj < 0.1)$seahorse)
+
+plotTab <- filter(corRes_conc, drug %in% drugList,
+                  seahorse %in% seaList) %>% mutate(concIndex = paste0("c",conc)) %>%
+  mutate(coef = ifelse(p.adj < 0.1, coef, 0),
+         seahorse = ifelse(seahorse != "ECAR.OCR.ratio", seahorse,
+                              "ECAR/OCR")) %>%
+  mutate(seahorse = gsub("[.]","\n",seahorse)) %>%
+  mutate(seahorse = factor(seahorse))
+
+#plot similar seahorse measurment together
+plotTab$seahorse <- factor(plotTab$seahorse, 
+                              levels = levels(plotTab$seahorse)[c(3,4,5,6,7,
+                                                                     9,1,2,8,11,10)])
+```
+
+Heatmap plot for p values (Supplementary Figure)
+```{r seaCorrlation_all, fig.path=plotDir, dev=c("png", "pdf"), fig.height=10,fig.width=12}
+ggplot(plotTab, aes(x=concIndex, y = drug, fill = coef)) + geom_tile(size = 0.3, color = "white") + facet_wrap(~ seahorse, nrow = 1) + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0,
+                       limits =c(-0.6,0.6), labels = seq(-0.8,0.8, by = 0.2),
+                       breaks = seq(-0.8,0.8, by = 0.2),
+                       name = "Coefficient") +
+  theme_bw() + theme(strip.text = element_text(face = "bold"),
+                     axis.text.y = element_text(size =12)) +
+  ylab("Drug name") + xlab("Concentration Index")
+```
+
+## Correlation of the responses between rotenone and orlistat
+
+Get the drug response data of rotenone and orlistat
+```{r}
+lpdCLL <- lpdAll[fData(lpdAll)$type == "viab",pData(lpdAll)$Diagnosis == "CLL"]
+lpdSub <- lpdCLL[fData(lpdCLL)$name %in% c("rotenone","orlistat") & 
+                     ! fData(lpdCLL)$subtype %in% c("4:5","1:5"),]
+fData(lpdSub)$conc <- sapply(seq(1,nrow(lpdSub)), function(i) {
+  conctab[fData(lpdSub)[i,]$id, paste0("c",fData(lpdSub)[i,]$subtype)]
+})
+
+viabTab <- data.frame(exprs(lpdSub)) %>% rownames_to_column("drugID") %>% 
+  gather(key = "patID", value = "viab", -drugID) %>% as_tibble() %>%
+  mutate(conc = fData(lpdSub)[drugID,]$conc,
+         name = fData(lpdSub)[drugID,]$name) %>%
+  select(-drugID) %>% spread(key = name, value = viab)
+```
+
+Perform correlation test
+```{r}
+testTab <- viabTab %>% group_by(conc) %>%
+  do(data.frame(p = cor.test(.$rotenone, .$orlistat)$p.value,
+                coef = cor(.$rotenone, .$orlistat)))
+```
+
+Plot the correlations (Supplementary Figure)
+```{r rotenoneVSorlistat, fig.path=plotDir, dev=c("png", "pdf"), fig.height=12,fig.width=8, warning=FALSE}
+pList <- lapply(seq(nrow(testTab)), function(i) {
+  p = testTab[i,]$p
+  coef = format(testTab[i,]$coef,digits = 2)
+  conc1 = testTab[i,]$conc
+  plotTab <- filter(viabTab, conc == conc1)
+  
+  annoText <- paste("'coefficient ='~",coef,"*","', p ='~",sciPretty(p,digits=2))
+  ggplot(plotTab, aes(x=100*rotenone, y = 100*orlistat)) + geom_point() + geom_smooth(method = "lmrob", se = FALSE) +
+    coord_cartesian(xlim = c(0,120), ylim = c(0,120)) + 
+    ggtitle(bquote("Concentration ="~.(conc1)~mu*"M")) +
+    annotate("text", x = 0, y = 123, label = annoText, vjust=1, hjust=0, size =4 , color = "darkred",parse = TRUE) +
+    xlab("rotenone (% viability)") + ylab("orlistat (% viability)") + 
+    theme_bw() +
+    theme(panel.grid = element_blank(),
+      axis.title = element_text(size=15, face="bold"),
+      axis.text = element_text(size=10),
+      plot.title = element_text(face="bold", hjust=0.5, size = 15 ),
+      legend.position = "none",
+      axis.title.x = element_text(face="bold"),
+      plot.margin = unit(c(0.5,0.5,0.5,0.5), "cm"))
+})
+grid.arrange(grobs= pList, ncol =2)
+```
+

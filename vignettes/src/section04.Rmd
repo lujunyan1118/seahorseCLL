@@ -1,0 +1,213 @@
+---
+title: 'Section 4: Transcriptomic analysis'
+author: "Junyan Lu"
+date: "`r doc_date()`"
+output:
+  BiocStyle::html_document
+---
+# Transcriptomic analysis
+```{r, message=FALSE, include=!exists(".standalone"), eval=!exists(".standalone"), echo=FALSE}
+library(seahorseCLL)
+library(BloodCancerMultiOmics2017)
+library(DESeq2)
+library(genefilter)
+library(ggbeeswarm)
+library(SummarizedExperiment)
+library(RColorBrewer)
+library(piano)
+library(pheatmap)
+library(grid)
+library(gridExtra)
+library(cowplot)
+library(tidyverse)
+```
+
+```{r echo=FALSE}
+plotDir = ifelse(exists(".standalone"), "", "section04/")
+if(plotDir!="") if(!file.exists(plotDir)) dir.create(plotDir)
+options(stringsAsFactors=FALSE)
+```
+
+
+## Differential expression between M-CLL and U-CLL samples
+
+### Data pre-processing
+Load data set
+```{r}
+data("dds", "patmeta","mutCOM","seaOri")
+```
+
+Only use CLL samples with IGHV annotations and have been used in seahorse experiments
+```{r}
+#annotate IGHV status
+dds$IGHV <- patmeta[match(dds$PatID, rownames(patmeta)),]$IGHV
+dds$diag <- patmeta[match(dds$PatID, rownames(patmeta)),]$Diagnosis
+
+#estimate size factor
+dds <- estimateSizeFactors(dds)
+
+#only choose CLL samples with IGHV annotations and have been used in seahorse experiments
+ddsCLL <- dds[,dds$diag == "CLL" & !is.na(dds$IGHV) & dds$PatID %in% colnames(seaOri)]
+
+#how many samples do we have?
+ncol(ddsCLL)
+```
+
+Filter genes
+```{r}
+#remove genes without gene symbol annotations
+ddsCLL <- ddsCLL[! rowData(ddsCLL)$symbol %in% c(NA,""),]
+ddsCLL <- ddsCLL[rowData(ddsCLL)$chromosome != "Y",]
+
+#only keep genes that have counts higher than 10 in any sample
+keep <- apply(counts(ddsCLL), 1, function(x) any(x >= 10)) 
+ddsCLL <- ddsCLL[keep,]
+
+# Remove transcripts which do not show variance across samples.
+sds <- rowSds(counts(ddsCLL, normalized = TRUE))
+sh <- shorth(sds)
+ddsCLL <- ddsCLL[sds >= sh,]
+
+#how many genes do we have
+nrow(ddsCLL)
+```
+
+Variance stabilizing tranformation
+```{r, cache=TRUE}
+ddsCLL.norm <- varianceStabilizingTransformation(ddsCLL)
+```
+
+### Identify differentially expressed gene between M-CLL and U-CLL using DESeq2
+
+Differential expression using DESeq2
+```{r, cache=TRUE}
+ddsCLL$IGHV <- factor(ddsCLL$IGHV, levels = c("U", "M"))
+design(ddsCLL) <- ~ IGHV
+ddsCLL <- DESeq(ddsCLL, betaPrior = TRUE)
+```
+
+Get differential expression result
+```{r}
+DEres <- as.tibble(results(ddsCLL, tidy = TRUE)) %>% mutate(symbol = rowData(ddsCLL)$symbol)
+```
+
+## Gene enrichment analysis
+
+Function for converting DEseq results to enrichment analysis input
+```{r}
+createInput <- function(DEres, pCut = 0.05, ifFDR = FALSE, rankBy = "stat") {
+  if (ifFDR) {
+    inputTab <- filter(DEres, padj <= pCut)
+  } else {
+    inputTab <- filter(DEres, pvalue <= pCut)
+  }
+  
+  inputTab <- arrange(inputTab, pvalue) %>% filter(!duplicated(symbol)) %>% select_("symbol", rankBy) %>% data.frame(stringsAsFactors = FALSE)
+  rownames(inputTab) <- inputTab$symbol
+  inputTab$symbol <- NULL
+  colnames(inputTab) <- "stat"
+  return(inputTab)
+}
+```
+
+load genesets
+```{r}
+gmts = list(H=system.file("extdata","h.all.v5.1.symbols.gmt", package="BloodCancerMultiOmics2017"),
+            C6=system.file("extdata","c6.all.v5.1.symbols.gmt", package="BloodCancerMultiOmics2017"),
+            KEGG=system.file("extdata","c2.cp.kegg.v5.1.symbols.gmt", package = "BloodCancerMultiOmics2017"))
+```
+
+Enrichment analysis using Hallmarks gene set
+```{r, warning=FALSE, message=FALSE}
+enRes <- list()
+inputTab <- createInput(DEres, pCut = 0.1, ifFDR = TRUE)
+enRes[["Gene enrichment analysis"]] <- runGSEA(inputTab = inputTab, gmtFile = gmts$H, GSAmethod = "page")
+
+#remove the HALLMARK_
+enRes$`Gene enrichment analysis`$Name <- gsub("HALLMARK_","", enRes$`Gene enrichment analysis`$Name)
+```
+
+Plot hallmark result
+```{r, fig.width=8, fig.height=4}
+enBar <- plotEnrichmentBar(enRes, pCut = 0.1, ifFDR = TRUE, setName = "Hallmark gene sets")
+plot(enBar)
+```
+
+### Heatmap plot of the expression values of genes in the glycolysis geneset
+
+Prepare the data for heatmap
+```{r}
+# load genes in the gene set
+gsc <- loadGSC(gmts$H)
+geneList <- gsc$gsc$HALLMARK_GLYCOLYSIS
+
+#select differentially expressed genes
+fdrCut <- 0.10
+sigDE <- filter(DEres, padj <= fdrCut, log2FoldChange < 0) %>% filter(symbol %in% geneList) %>%
+  arrange(log2FoldChange)
+
+#get the expression matrix
+plotMat <- assay(ddsCLL.norm[sigDE$row,])
+colnames(plotMat) <- ddsCLL.norm$PatID
+rownames(plotMat) <- sigDE$symbol
+
+#sort columns of plot matrix based on trisomy12 status
+plotMat <- plotMat[,order(ddsCLL$IGHV)]
+
+#calculate z-score and sensor
+plotMat <- t(scale(t(plotMat)))
+plotMat[plotMat >= 4] <- 4
+plotMat[plotMat <= -4] <- -4
+
+annoCol <- data.frame(row.names = ddsCLL.norm$PatID, `IGHV` = ddsCLL.norm$IGHV)
+```
+
+Plot the heatmap
+```{r, fig.height=8, fig.width=8}
+#color for colum annotation
+annoColor <- list(IGHV = c(M = "red", U = "grey80"))
+
+hallHeatmap <- pheatmap(plotMat, color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(100),
+         cluster_cols = FALSE, cluster_rows = FALSE,
+         annotation_col = annoCol, annotation_colors = annoColor,
+         show_colnames = FALSE, fontsize_row = 8, breaks = seq(-5,5, length.out = 101), treeheight_row = 0,
+         border_color = NA, main = "HALLMARK_GLYCOLYSIS",silent = TRUE)$gtable
+
+grid.draw(hallHeatmap)
+```
+
+### Beeswarm plot of expression values of key glycolytic genes
+
+```{r}
+plotGenes <- c("PFKP","PGAM1","PGK1")
+plotTab <- data.frame(assay(ddsCLL.norm[rowData(ddsCLL.norm)$symbol %in% plotGenes,]))
+colnames(plotTab) <- ddsCLL.norm$PatID
+plotTab$symbol <- rowData(ddsCLL.norm[rowData(ddsCLL.norm)$symbol %in% plotGenes,])$symbol
+plotTab <- gather(plotTab, key = "PatID", value = "value", -symbol) %>%
+  mutate(IGHV = colData(ddsCLL.norm)[match(PatID, ddsCLL.norm$PatID),]$IGHV)
+
+beePlot <- ggplot(plotTab, aes(x=IGHV, y = value)) + 
+    stat_boxplot(geom = "errorbar", width = 0.3) +
+    geom_boxplot(outlier.shape = NA, col="black", width=0.4) + 
+    geom_beeswarm(cex=2, size =0.5, aes(col = IGHV)) + theme_classic() +
+    xlab("") + ylab("normalized expression") +
+    scale_color_manual(values = c("M" = "red","U" = "grey30")) +
+    theme(axis.line.x = element_blank(), axis.ticks.x = element_blank(),
+           axis.title = element_text(size=12, face="bold"),
+           axis.text = element_text(size=12),
+           plot.title = element_text(face="bold", hjust=0.5),
+           legend.position = "none",
+           axis.title.x = element_text(face="bold"),
+          strip.background = element_blank(),
+          strip.text = element_text(size=15, face = "bold")) +
+  facet_wrap(~ symbol, scales = "free")
+```
+
+### Combined plots for manuscript (Figure 3)
+```{r expressionIGHV, fig.height=6, fig.width=10, fig.path=plotDir, dev=c("png", "pdf")}
+ggdraw() + 
+  draw_plot(enBar, 0, 0.5, 0.5, 0.45) + 
+  draw_plot(hallHeatmap, 0.5, 0, 0.5, 0.95) +
+  draw_plot(beePlot, 0, 0, 0.5, 0.4) +
+  draw_plot_label(c("A","B","C"), c(0, 0.5, 0), c(1, 1, 0.45), fontface = "plain", size=20)
+```

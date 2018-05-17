@@ -1,0 +1,105 @@
+---
+title: "Characterising CLL bioenergetics through Seahorse extracellular flux assay"
+vignette: >
+  %\VignetteIndexEntry{seahorseCLL}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+output:
+  BiocStyle::html_document
+---
+
+
+# Introduction
+
+This package contains the data of bioenergetic features of 152 CLL samples and 9 B cell samples, measured by Seahorse extracellular flux assay. This package also reproduces figures presented in the paper "Energy metabolism influences drug sensitivity and is co-determined by genetic variants in CLL" by Lu J, Böttcher M et al.
+
+***
+
+In this vignette we present the integrative analysis of CLL bioenergetic data set and the source code for the paper
+
+<br />
+
+*This vignette was put together by Junyan Lu*
+
+<br />
+
+
+This vignette is build from the sub-vignettes, which each can be build separatelly. The parts are separated by the horizontal lines. Each part finishes with removal of all the created objects.
+
+
+```{r echo=FALSE}
+.standalone=FALSE
+```
+
+```{r, message=FALSE, warning=FALSE, include=!.standalone}
+library(seahorseCLL)
+library(BloodCancerMultiOmics2017)
+library(SummarizedExperiment)
+library(ggbeeswarm)
+library(xtable)
+library(cowplot)
+library(piano)
+library(gridExtra)
+library(grid)
+library(genefilter)
+library(pheatmap)
+library(DESeq2)
+library(survival)
+library(maxstat)
+library(survminer)
+library(glmnet)
+library(RColorBrewer)
+library(reshape2)
+library(gtable)
+library(tidyverse)
+```
+
+***
+
+<!-- **p1** -->
+
+```{r p01, child = 'src/section01.Rmd'}
+```
+
+***
+
+<!-- **p2** -->
+
+```{r p02, child = 'src/section02.Rmd'}
+```
+
+***
+
+<!-- **p3** -->
+
+```{r p03, child = 'src/section03.Rmd'}
+```
+
+***
+
+<!-- **p4**-->
+
+```{r p04, child = 'src/section04.Rmd'}
+```
+
+***
+
+<!-- **p5** -->
+
+```{r p05, child = 'src/section05.Rmd'}
+```
+
+***
+
+<!-- **p6** -->
+
+```{r p06, child = 'src/section06.Rmd'}
+```
+
+***
+
+# End of session
+
+```{r}
+sessionInfo()
+```

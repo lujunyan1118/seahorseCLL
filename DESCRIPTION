@@ -1,0 +1,32 @@
+Package: seahorseCLL
+Type: Package
+Title: Characterising CLL bioenergetics through Seahorse extracellular flux assay
+Version: 1.0.0
+Author: Junyan Lu
+Maintainer: Junyan Lu <junyan.lu@embl.de>
+Description: This package contains the data of bioenergetic features of 152 CLL samples and 9 B cell samples, measured by Seahorse extracellular flux assay. This package also reproduces figures presented in the paper "Energy metabolism influences drug sensitivity and is co-determined by genetic variants in CLL" by Lu J, Böttcher M et al.
+License: LGPL (>= 3)
+Encoding: UTF-8
+LazyData: true
+VignetteBuilder: knitr
+Depends: R (>= 3.4.0)
+Imports:
+  BloodCancerMultiOmics2017,
+  SummarizedExperiment,
+  ggbeeswarm,
+  xtable,
+  cowplot,
+  piano,
+  gridExtra,
+  grid,
+  pheatmap,
+  genefilter,
+  DESeq2,
+  survival,
+  maxstat,
+  survminer,
+  glmnet,
+  RColorBrewer,
+  reshape2,
+  tidyverse
+RoxygenNote: 6.0.1

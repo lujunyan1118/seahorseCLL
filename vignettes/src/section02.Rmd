@@ -1,0 +1,286 @@
+---
+title: 'Section 2: Impact of genetic heterogeneity on energy metabolism of CLL'
+author: "Junyan Lu"
+date: "`r doc_date()`"
+output:
+  BiocStyle::html_document
+---
+# Impact of genetic heterogeneity on energy metabolism of CLL
+
+```{r, message=FALSE, include=!exists(".standalone"), eval=!exists(".standalone"), echo=FALSE}
+library(seahorseCLL)
+library(BloodCancerMultiOmics2017)
+library(SummarizedExperiment)
+library(ggbeeswarm)
+library(cowplot)
+library(reshape2)
+library(RColorBrewer)
+library(gridExtra)
+library(xtable)
+library(tidyverse)
+```
+
+```{r echo=FALSE}
+plotDir = ifelse(exists(".standalone"), "", "section02/")
+if(plotDir!="") if(!file.exists(plotDir)) dir.create(plotDir)
+options(stringsAsFactors=FALSE)
+```
+
+```{r, echo=FALSE}
+#Global aesthetic options for ggplots
+myTheme <- theme_bw() + theme(axis.title = element_text(size = 18), 
+                              axis.text = element_text(size = 18),
+                              legend.text = element_text(size =15), 
+                              legend.title = element_text(size = 15),
+                              panel.grid =  element_blank())
+```
+
+## Data pre-processing
+
+Load data
+```{r}
+data("lpdAll", "seaOri","seaCombat", "patmeta", "mutCOM")
+```
+
+
+Subsetting 
+```{r}
+#overlap between the patient samples in seahorse dataset and main screen dataset
+lpdCLL <- lpdAll[,pData(lpdAll)$Diagnosis %in% "CLL"]
+seaMain <- intersect(colnames(seaOri),colnames(lpdCLL))
+length(seaMain)
+
+#CLL seahorse data
+seaSub <- t(assays(seaOri[,seaMain])$seaMedian)
+```
+
+Get patient genetic background 
+```{r}
+#extract genetic background information
+genBack <- exprs(lpdCLL)[fData(lpdCLL)$type %in%
+                          c("gen","Methylation_Cluster","IGHV"), seaMain]  
+
+genBack <- genBack[! rownames(genBack) %in% 
+                     c("del13q14_bi","del13q14_mono"),]
+
+genBack <- data.frame(t(genBack))
+colnames(genBack) <- replace(colnames(genBack), colnames(genBack) == "del13q14_any", "del13q14")
+```
+
+
+## Hypothesis testing: genetic variants vs bioenergetic features
+
+Pre-processing genetic background matrix
+```{r}
+#get genetic background information
+geneSub <- genBack[seaMain,]
+
+geneSub <- t(geneSub)
+
+#filtering genetic background matrix. 
+#Each sample should have at least 10 records 
+#and each variant should be exist in at least 5 samples
+
+geneSub <- geneSub[rowSums(!is.na(geneSub)) >= 10,]
+geneSub <- geneSub[rowSums(geneSub >=1, na.rm = TRUE) >= 5, ]
+
+seaTest <- t(seaSub)
+```
+
+
+Perform ANOVA-test, including batch as a co-variate.
+```{r}
+#record missing values
+sea.noNA <- !is.na(seaTest)
+mut.noNA <- !is.na(geneSub)
+
+#prepare matrix to store raw p-values
+p.raw.mat <- mean.mat <- matrix(NA, nrow(seaTest),nrow(geneSub))
+colnames(p.raw.mat) <- colnames(mean.mat) <- rownames(geneSub)
+rownames(p.raw.mat) <- rownames(mean.mat) <- rownames(seaTest)
+
+#calculate p-value for each measurement-variant combination.
+for (i in 1:nrow(seaTest)) {
+    for (j in 1:nrow(geneSub)) {
+        com.noNA <- (sea.noNA[i,] & mut.noNA[j,])
+        genotype <- geneSub[j, com.noNA]
+        batch <- factor(colData(seaOri)[names(com.noNA[com.noNA]),]$dateMST)
+        
+        if (length(genotype) >= 10 & sum(genotype) >= 5) {
+            seaGen <- seaTest[i,com.noNA]
+            genotype <- as.factor(genotype)
+            res <- summary(aov(seaGen ~ genotype + batch))
+            p.raw.mat[i,j] <- res[[1]][5][1,]
+            mean.mat[i,j] <- mean(seaGen[genotype==1]) - mean(seaGen[genotype==0])
+        }
+    }
+}
+```
+
+
+Multiple hypothesis testing
+```{r}
+#processing the p-value and multi-hypothesis correlations.
+p.tab <- melt(p.raw.mat)
+colnames(p.tab) <- c('Measurement','Variant','P.raw')
+p.tab$FC <- melt(mean.mat)$value
+p.tab$Measurement <- as.character(p.tab$Measurement)
+p.tab$Variant <- as.character(p.tab$Variant)
+p.tab <- filter(p.tab, !is.na(P.raw)) #remove NAs
+p.tab$P.adj <- p.adjust(p.tab$P.raw, method = "BH")
+#select and show the significant one (according to the raw p value)
+p.tab.sig <- p.tab[p.tab$P.raw <= 0.05,]
+p.tab.sig <- p.tab.sig[order(p.tab.sig$Measurement),]
+hist(p.tab$P.raw, breaks=20, col= "lightgreen", 
+     main = "Seahorse VS genetics", xlab = "raw P values")
+```
+
+
+Create a table show significant associations (for supplementary table)
+```{r, results=FALSE}
+#pCut <- 0.01
+
+tabOut <- filter(p.tab, P.adj <= 0.1) %>% mutate(Measurement = formatSea(Measurement)) %>%
+  mutate(Variant = ifelse(Variant == "IGHV.Uppsala.U.M", "IGHV status", Variant)) %>%
+  select(Measurement, Variant, P.raw, FC, P.adj)
+
+colnames(tabOut) <- c("Seahorse measurment", "Genetic variant", "p value", "Difference of mean", "adjusted p value")
+
+write(print(xtable(tabOut, digits = 3, 
+             caption = "ANOVA test results (adjusted for batch effect) of energy metabolic measurements related to different genetic variants"), 
+      include.rownames=FALSE,
+      caption.placement = "top"), file = "section02/tTest_SeahorseVSgene.tex")
+
+```
+
+Scatter plot of p values
+```{r, fig.width=8, fig.height=10}
+#prepare table for plot
+
+p.tab[p.tab$P.adj >= 0.05,]$Variant <- "not significant"
+
+#prepare table for plot
+plotTab <- mutate(p.tab, Variant = ifelse(Variant == "IGHV.Uppsala.U.M", "IGHV status", Variant))
+plotTab$Measurement <- sapply(plotTab$Measurement, function(x) {gsub("\\."," ",x)})
+
+#define color
+colList <- c("#c0508a", "#79c858", "#7e45b9", "#c0ad52",
+             "#8c8bbd", "#c35c41", "#86bca8", "#4b3e3a","grey80")
+varName <- sort(as.character(unique(plotTab$Variant)))
+varName <- c(varName[varName != "not significant"],"not significant")
+names(colList) <- varName
+
+#define legend order
+plotTab$Variant <- factor(plotTab$Variant, levels = rev(names(colList)))
+#fdr cut-off
+fdrCut <- max(filter(plotTab, Variant != "not significant")$P.raw)
+
+p <- ggplot(data=plotTab, aes(x= Measurement, y=-log10(P.raw),col=Variant))+ 
+  geom_jitter(size=3, width = 0.15) + 
+  geom_hline(yintercept = -log10(fdrCut), linetype="dotted") + 
+  ylab(expression(-log[10]*'('*p~value*')')) + xlab("Seahore measurements") +
+  theme_bw() + scale_color_manual(values = colList) +
+  theme(axis.text.x = element_text(vjust=0.5, hjust = 1,size=15),
+        axis.text.y = element_text(size=15),
+        axis.title = element_text(size =18)) +
+  annotate(geom = "text", x = 0.7, y = -log10(fdrCut) - 0.5, label = "5% FDR") +
+  guides(color=guide_legend(title="Genetic variant")) +
+  coord_flip()
+plot(p)
+
+```
+
+Plot all significant associations as beeswarm plot
+```{r}
+p.tab.sig <- p.tab[p.tab$Variant != "not significant",]
+
+#batch effect corrected values should be used for plot
+seaPlot <- assays(seaCombat)$seaMedian
+seaPlot <- seaPlot[rownames(seaTest), colnames(seaTest)]
+
+gList <- lapply(seq(1,nrow(p.tab.sig)), function(i) {
+  seaName <- as.character(p.tab.sig[i,1])
+  geneName <- as.character(p.tab.sig[i,2])
+  pval <- p.tab.sig[i,3]
+  
+  plotTab <- tibble(Measurement = seaPlot[seaName,], Mutation = geneSub[geneName,]) %>% 
+    filter(!is.na(Measurement), !is.na(Mutation))
+  
+  #for IGHV
+  if (geneName == "IGHV.Uppsala.U.M") {
+    geneName <- "IGHV status"
+    plotTab <- mutate(plotTab, 
+                      Status = ifelse(Mutation == 0, 
+                                      sprintf("unmutated (n=%s)", sum(Mutation == 0)), 
+                                      sprintf("mutated (n=%s)", sum(Mutation == 1))))
+  } else if (geneName == "Methylation_Cluster") {
+    plotTab <- mutate(plotTab,
+                      Status = ifelse(Mutation == 0,sprintf("LP (n=%s)", sum(Mutation == 0)),
+                                      ifelse(Mutation == 1, sprintf("IP (n=%s)", sum(Mutation == 1)),
+                                             sprintf("HP (n=%s)", sum(Mutation == 2)))))
+  } else plotTab <- mutate(plotTab, 
+                           Status = ifelse(Mutation == 0,
+                                          sprintf("wild type (n=%s)", sum(Mutation == 0)), 
+                                          sprintf("mutated (n=%s)", sum(Mutation == 1))))
+  
+  #reverse label factor (wildtype always on the rigt)
+  plotTab <- mutate(plotTab, Status = factor(Status)) %>% 
+    mutate(Status = factor(Status, levels = rev(levels(Status))))
+  
+  # color scheme, black for wildtype, red for mutated
+  if (length(levels(plotTab$Status)) == 2) {
+    colorList <- c("black","red")
+    names(colorList) <- levels(plotTab$Status)
+  } else {
+    colorList <- c("lightblue","blue", "darkblue")
+    names(colorList) <- levels(plotTab$Status)
+  }
+  
+  
+  #set y label
+  if (seaName %in% c("ECAR.OCR.ration")) {
+    yLab = "ECAR/OCR"
+  } else if (seaName %in% c("maximal.respiration","spare.respiratory.capacity","basal.respiration",
+                            "ATP.production","OCR","proton.leak")) {
+    yLab = "OCR (pMol/min)" } else yLab = "ECAR (pMol/min)"
+  
+  #replace the "." in the mearement name with space
+  seaName <- gsub("\\."," ",seaName)
+  
+  #plot title
+  plotTitle <- paste(sprintf("'%s ~ %s (p = '~",seaName,geneName),
+                     sciPretty(pval, digits = 2),"*')'")
+  
+  ggplot(plotTab, aes(x=Status, y = Measurement)) + 
+      stat_boxplot(geom = "errorbar", width = 0.3) +
+      geom_boxplot(outlier.shape = NA, col="black", width=0.4) + 
+      geom_beeswarm(cex=2, size =1, aes(col = Status)) + theme_classic() +
+      xlab("") + ylab(yLab) + ggtitle(parse(text=plotTitle)) + 
+      scale_color_manual(values = colorList) +
+      theme(axis.line.x = element_blank(), axis.ticks.x = element_blank(),
+             axis.title = element_text(size=18, face="bold"),
+             axis.text = element_text(size=18),
+             plot.title = element_text(hjust=0.5,size=15),
+             legend.position = "none",
+             axis.title.x = element_text(face="bold"))
+  
+})
+```
+
+Combine p value scatter plot and beeswarm plots (Figure 2)
+```{r  seaVSgene, fig.path=plotDir, dev=c("png", "pdf"), fig.width=13, fig.height=8}
+ggdraw() +
+  draw_plot(p, 0, 0, 0.6, 1) +
+  draw_plot(gList[[13]], 0.6, 0 , .4, .48) +
+  draw_plot(gList[[15]], 0.6, 0.5 , .4, .48) +
+  draw_plot_label(c("A", "B", "C"), 
+                  c(0, 0.58, 0.58), c(1, 1, 0.5), size = 20)
+```
+
+Plot the rest in a separate pdf file (For supplementary figure)
+```{r  Seahorse_vs_gene_beeswarm, fig.path=plotDir, dev=c("png", "pdf"), fig.height=23, fig.width=15}
+gList[c(13,15)] <- NULL
+grid.arrange(grobs = gList, ncol=2)
+
+```
+

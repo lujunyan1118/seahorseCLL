@@ -1,0 +1,681 @@
+---
+title: "Section 06: Multivairate analysis explaining heterogeneity in Seahorse data"
+author: "Junyan Lu"
+date: "8/18/2017"
+output:
+  BiocStyle::html_document
+---
+# Multivairate analysis explaining heterogeneity in Seahorse data
+```{r, message=FALSE, include=!exists(".standalone"), eval=!exists(".standalone")}
+library("BloodCancerMultiOmics2017")
+library("seahorseCLL")
+library("Biobase")
+library("SummarizedExperiment")
+library("reshape2")
+library("DESeq2")
+library("RColorBrewer")
+library("glmnet")
+library("piano")
+library("grid")
+library("gridExtra")
+library("gtable")
+library("cowplot")
+library("tidyverse")
+```
+
+```{r echo=FALSE}
+plotDir = ifelse(exists(".standalone"), "", "section06/")
+if(plotDir!="") if(!file.exists(plotDir)) dir.create(plotDir)
+options(stringsAsFactors=FALSE)
+```
+
+## Building multi-variate models that predict CLL bioenergetic features
+
+Loading the data.
+```{r}
+data(list=c("conctab", "drpar", "drugs", "patmeta", "lpdAll", "dds", "mutCOM",
+"methData","seaCombat","pretreat"))
+```
+
+
+### Data pre-processing
+
+For gene expression and methylation data
+```{r, cache=TRUE}
+#only consider CLL patients
+CLLPatients<-rownames(patmeta)[which(patmeta$Diagnosis=="CLL")]
+
+e<-dds
+colnames(e)<-colData(e)$PatID
+
+#Methylation Data
+methData = t(assay(methData))
+methPCA <- prcomp(methData, center = T, scale. = TRUE)$x[,1:20]
+
+#RNA Data
+eCLL<-e[,colnames(e) %in% CLLPatients]
+
+#filter out genes without gene name
+eCLL<-eCLL[(!rowData(eCLL)$symbol %in% c("",NA)),]
+
+#filter out low count genes
+###
+minrs <- 100
+rs  <- rowSums(assay(eCLL))
+eCLL<-eCLL[ rs >= minrs, ]
+
+#variance stabilize the data
+vstCounts<-varianceStabilizingTransformation(eCLL)
+vstCounts<-assay(vstCounts)
+
+#filter out low variable genes
+ntop<-5000
+vstCountsFiltered<-vstCounts[order(apply(vstCounts, 1, var, na.rm=T),
+                                   decreasing = T)[1:ntop],]
+eData<-t(vstCountsFiltered)
+
+#Prepare PCA
+pcRes <- prcomp(eData, center = T, scale. = TRUE)
+rnaPCA <- pcRes$x[,1:20]
+pcLoad <- pcRes$rotation[,1:20]
+```
+
+For genetic data
+```{r}
+#genetics
+mutCOMbinary<-channel(mutCOM, "binary")
+mutCOMbinary<-mutCOMbinary[featureNames(mutCOMbinary) %in% colnames(seaCombat),]
+genData<-exprs(mutCOMbinary)
+idx <- which(colnames(genData) %in% c("del13q14_bi", "del13q14_mono"))
+genData <- genData[,-idx]
+colnames(genData)[which(colnames(genData)=="del13q14_any")] = "del13q14"
+
+#remove gene with higher than 20% missing values
+genData <- genData[,colSums(is.na(genData))/nrow(genData) <= 0.2]
+
+#fill the missing value with majority
+genData <- apply(genData, 2, function(x) {
+  xVec <- x
+  avgVal <- mean(x,na.rm= TRUE)
+  if (avgVal >= 0.5) {
+    xVec[is.na(xVec)] <- 1
+  } else xVec[is.na(xVec)] <- 0
+  xVec
+})
+```
+
+For IGHV and methylation cluster
+```{r}
+#IGHV
+translation <- c(`U` = 0, `M` = 1)
+stopifnot(all(patmeta$IGHV %in% c("U","M", NA)))
+IGHVData <- matrix(translation[patmeta$IGHV], 
+                   dimnames = list(rownames(patmeta), "IGHV"), ncol = 1)
+IGHVData<-IGHVData[rownames(IGHVData) %in% CLLPatients,,drop=F]
+#remove patiente with NA IGHV status
+IGHVData<-IGHVData[!is.na(IGHVData), ,drop=F]
+
+# Methylation cluster
+translation <- c(`HP` = 2, `IP` = 1, `LP` = 0)
+Mcluster <- matrix(translation[patmeta$ConsClust],
+                   dimnames = list(rownames(patmeta), "ConsCluster"), ncol = 1)
+Mcluster <- Mcluster[rownames(Mcluster) %in% CLLPatients,,drop=F]
+Mcluster <- Mcluster[!is.na(Mcluster), ,drop=F]
+```
+
+For demographic and clinical data
+```{r}
+#demographics (age and sex)
+patmeta<-subset(patmeta, Diagnosis=="CLL")
+gender <- ifelse(patmeta[,"Gender"]=="m",0,1)
+
+
+# impute missing values in age by mean
+ImputeByMean <- function(x) {x[is.na(x)] <- mean(x, na.rm=TRUE); return(x)}
+age<-ImputeByMean(patmeta[,"Age4Main"])
+
+
+demogrData <- cbind(age=age,gender=gender)
+rownames(demogrData) <- rownames(patmeta)
+
+#Pretreatment
+pretreated<- pretreat
+```
+
+For drug response data
+```{r, warning=FALSE, message=FALSE}
+#Remove bad drugs. Bortezomib lost its activity during storage. The data for this drug and NSC 74859 were discarded from further analysis.
+badrugs = c("D_008", "D_025") 
+lpdCLL <- lpdAll[!fData(lpdAll)$id %in% badrugs, pData(lpdAll)$Diagnosis == "CLL"]
+
+# get drug responsee data
+get.drugresp <- function(lpd) {
+  drugresp = t(exprs(lpd[fData(lpd)$type == 'viab'])) %>%
+    tbl_df %>% dplyr::select(-ends_with(":5")) %>%
+    dplyr::mutate(ID = colnames(lpd)) %>%
+    tidyr::gather(drugconc, viab, -ID) %>%
+    dplyr::mutate(drug = drugs[substring(drugconc, 1, 5), "name"],
+           conc = sub("^D_([0-9]+_)", "", drugconc)) %>%
+    dplyr::mutate(conc = as.integer(gsub("D_CHK_", "", conc)))
+  
+  drugresp
+}
+drugresp <- get.drugresp(lpdCLL)
+
+#Use median polish to summarise drug response of the five concentrations
+get.medp <- function(drugresp) {
+  tab = drugresp %>% group_by(drug, conc) %>% 
+    do(data.frame(v = .$viab, ID = .$ID)) %>% spread(ID, v)
+  
+  med.p = lapply(unique(tab$drug), function(n) {
+    tb = filter(tab, drug == n) %>% ungroup() %>% 
+      dplyr::select(-(drug:conc)) %>% 
+      as.matrix %>% `rownames<-`(1:5)
+    mdp = stats::medpolish(tb, trace.iter = FALSE)
+    df = as.data.frame(mdp$col) + mdp$overall
+    colnames(df) <- n
+    df
+  }) %>% bind_cols()
+  
+  
+  
+  medp.viab = tbl_df(med.p) %>% mutate(ID = colnames(tab)[3:ncol(tab)]) %>%
+    gather(drug, viab, -ID) 
+  medp.viab
+}
+drugresp.mp <- get.medp(drugresp)
+viabData <- dcast(drugresp.mp, ID ~ drug, value.var = "viab" )
+rownames(viabData) <- viabData$ID
+viabData$ID <- NULL
+```
+
+Prepare seahorse meaurement (response vector)
+```{r}
+sea <- t(assays(seaCombat)$seaMedian)
+```
+
+Function to Generate the explanatory dataset for each seahorse measurements
+```{r explain dataset for seahorse}
+#function to generate response vector and explainatory variable for each seahorse measurement
+
+generateData <- function(inclSet, onlyCombine = FALSE, censor = NULL, robust = FALSE) {
+    
+    dataScale <- function(x, censor = NULL, robust = FALSE) {
+        #function to scale different variables
+        if (length(unique(na.omit(x))) == 2){
+          #a binary variable, change to -0.5 and 0.5 for 1 and 2
+          x - 0.5
+        } else if (length(unique(na.omit(x))) == 3) {
+          #catagorical varialbe with 3 levels, methylation_cluster, change to -0.5,0,0.5
+          (x - 1)/2
+        } else {
+          if (robust) {
+          #continuous variable, centered by median and divied by 2*mad
+          mScore <- (x-median(x,na.rm=TRUE))/(1.4826*mad(x,na.rm=TRUE))
+            if (!is.null(censor)) {
+              mScore[mScore > censor] <- censor
+              mScore[mScore < -censor] <- -censor
+            }
+          mScore/2
+          } else {
+            mScore <- (x-mean(x,na.rm=TRUE))/(sd(x,na.rm=TRUE))
+              if (!is.null(censor)) {
+                mScore[mScore > censor] <- censor
+                mScore[mScore < -censor] <- -censor
+              }
+          mScore/2
+          }
+        }
+      }
+    
+    
+    
+    allResponse <- list()
+    allExplain <- list()
+
+    for (measure in colnames(inclSet$seahorse)) {
+      y <- inclSet$seahorse[,measure]
+      y <- y[!is.na(y)]
+      
+      #get overlapped samples for each dataset 
+      overSample <- names(y)
+      
+      for (eachSet in inclSet) {
+        overSample <- intersect(overSample,rownames(eachSet))
+      }
+      
+      y <- dataScale(y[overSample], censor = censor, robust = robust)
+      
+      #generate explainatory variable table for each seahorse measurement
+      expTab <- list()
+      
+      if ("drugs" %in% names(inclSet)) {
+        viabTab <- inclSet$drugs[overSample,]
+        vecName <- sprintf("drugs(%s)",ncol(viabTab))
+        colnames(viabTab) <- paste0("con.",colnames(viabTab))
+        expTab[[vecName]] <- apply(viabTab,2,dataScale,censor = censor, robust = robust)
+      }
+      
+      if ("gen" %in% names(inclSet)) {
+        geneTab <- inclSet$gen[overSample,]
+        #at least 3 mutated sample
+        geneTab <- geneTab[, colSums(geneTab) >= 3]
+        vecName <- sprintf("genetic(%s)", ncol(geneTab))
+        expTab[[vecName]] <- apply(geneTab,2,dataScale)
+      }
+      
+      
+      if ("RNA" %in% names(inclSet)){
+        
+        #for PCA
+        rnaPCA <- inclSet$RNA[overSample, ]
+        colnames(rnaPCA) <- paste0("con.expression",colnames(rnaPCA), sep = "")
+        expTab[["expression(20)"]] <- apply(rnaPCA,2,dataScale, censor = censor, robust = robust)
+        
+      }
+        
+      
+      if ("meth" %in% names(inclSet)){
+        methPCA <- inclSet$meth[overSample,]
+        colnames(methPCA) <- paste("con.methylation",colnames(methPCA),sep = "")
+        expTab[["methylation(20)"]] <- apply(methPCA[,1:20],2,dataScale, censor = censor, robust = robust)
+      }
+      
+      if ("IGHV" %in% names(inclSet)) {
+        IGHVtab <- inclSet$IGHV[overSample,,drop=FALSE]
+        expTab[["IGHV(1)"]] <- apply(IGHVtab,2,dataScale)
+      }
+      
+      if ("Mcluster" %in% names(inclSet)) {
+        methTab <- inclSet$Mcluster[overSample,,drop=FALSE]
+        colnames(methTab) <- "methylation cluster"
+        expTab[["methCluster(1)"]] <- apply(methTab,2,dataScale)
+      }
+      
+      if ("demographics" %in% names(inclSet)){
+        demoTab <- inclSet$demographics[overSample,]
+        vecName <- sprintf("demographics(%s)", ncol(demoTab))
+        expTab[[vecName]] <- apply(demoTab,2,dataScale)
+      }
+      
+      if ("pretreated" %in% names(inclSet)){
+        preTab <- inclSet$pretreated[overSample,,drop=FALSE]
+        expTab[["pretreated(1)"]] <- apply(preTab,2,dataScale)
+      }
+      
+      comboTab <- c()
+      for (eachSet in names(expTab)){
+        comboTab <- cbind(comboTab, expTab[[eachSet]])
+      }
+      vecName <- sprintf("all(%s)", ncol(comboTab))
+      expTab[[vecName]] <- comboTab
+      
+      measureName <- sprintf("%s(%s)",formatSea(measure),length(y))
+      allResponse[[measureName]] <- y
+      allExplain[[measureName]] <- expTab
+    }
+  if (onlyCombine) {
+    #only return combined results, for feature selection
+    allExplain <- lapply(allExplain, function(x) x[length(x)])
+  }
+    
+  return(list(allResponse=allResponse, allExplain=allExplain))
+
+}
+```
+
+
+### Calulate bioenergetic variance explained by multi-omics data set
+
+#### Training models
+
+Clean and integrate multi-omics data
+```{r}
+inclSet<-list(RNA=rnaPCA, meth=methPCA, gen=genData, IGHV=IGHVData,
+            demographics=demogrData, drugs=viabData, pretreated=pretreated, seahorse = sea)
+cleanData <- generateData(inclSet, censor = 4)
+```
+
+Function for multi-variate regression
+```{r runGlm function}
+runGlm <- function(X, y, method = "ridge", repeats=20, folds = 3) {
+  modelList <- list()
+  lambdaList <- c()
+  varExplain <- c()
+  coefMat <- matrix(NA, ncol(X), repeats)
+  rownames(coefMat) <- colnames(X)
+
+  if (method == "lasso"){
+    alpha = 1
+  } else if (method == "ridge") {
+    alpha = 0
+  }
+  
+  for (i in seq(repeats)) {
+    if (ncol(X) > 2) {
+      res <- cv.glmnet(X,y, type.measure = "mse", family="gaussian", 
+                       nfolds = folds, alpha = alpha, standardize = FALSE)
+      lambdaList <- c(lambdaList, res$lambda.min)
+      modelList[[i]] <- res
+      
+      coefModel <- coef(res, s = "lambda.min")[-1] #remove intercept row
+      coefMat[,i] <- coefModel
+      
+      #calculate variance explained
+      y.pred <- predict(res, s = "lambda.min", newx = X)
+      varExp <- cor(as.vector(y),as.vector(y.pred))^2
+      varExplain[i] <- ifelse(is.na(varExp), 0, varExp) 
+      
+    } else {
+      fitlm<-lm(y~., data.frame(X))
+      varExp <- summary(fitlm)$r.squared
+      varExplain <- c(varExplain, varExp)
+      
+    }
+
+  }
+  list(modelList = modelList, lambdaList = lambdaList, varExplain = varExplain, coefMat = coefMat)
+}
+```
+
+Perform lasso regression
+```{r, lasso all, cache=TRUE, warning=FALSE, message=FALSE}
+lassoResults <- list()
+for (eachMeasure in names(cleanData$allResponse)) {
+  dataResult <- list()
+  for (eachDataset in names(cleanData$allExplain[[eachMeasure]])) {
+    y <- cleanData$allResponse[[eachMeasure]]
+    X <- cleanData$allExplain[[eachMeasure]][[eachDataset]]
+  
+   
+    glmRes <- runGlm(X, y, method = "lasso", repeats = 100, folds = 3)
+    dataResult[[eachDataset]] <- glmRes 
+  }
+  lassoResults[[eachMeasure]] <- dataResult
+  
+}
+```
+
+
+#### Ploting results
+
+Function for plotting variance explained for each measurement
+```{r, echo=F}
+plotVar <- function(glmResult) {
+  
+  plotList <- list()
+  for (eachMeasure in names(glmResult)) {
+    plotTab <- c()
+    for (eachSet in names(glmResult[[eachMeasure]])) {
+      plotTab <- cbind(plotTab,glmResult[[eachMeasure]][[eachSet]]$varExplain)
+    }
+    
+    colnames(plotTab) <- names(glmResult[[eachMeasure]])
+      
+    plotTab <- data.frame(plotTab) %>% melt(id.vars=NULL) %>% group_by(variable) %>% summarise(mean=mean(value),sd=sd(value))
+    
+    plotTab$variable <- factor(names(glmResult[[eachMeasure]]),levels = names(glmResult[[eachMeasure]]))
+    
+    #add plot title
+    plotTitle <- strsplit(eachMeasure,split = "[()]")[[1]][1]
+    
+    g <- ggplot(plotTab,aes(x=variable, y=mean, fill= variable)) + 
+      geom_bar(position=position_dodge(), stat="identity", width = 0.8, col="black") + 
+      geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd, width = 0.3), position=position_dodge(.9)) + 
+      theme_classic() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size =12), 
+                              plot.title = element_text(hjust =0.5),
+                              axis.text.y = element_text(size=12),
+                              axis.title = element_text(size=15),
+                              legend.position = "none") + 
+      scale_fill_brewer("Set1",type = "qual") + coord_cartesian(ylim = c(0,1)) +
+      ylab("R2") + xlab("") + ggtitle(formatSea(plotTitle))
+    
+    plotList[[eachMeasure]] <- g
+  }
+  return(plotList)
+}
+
+varList <- plotVar(lassoResults)
+```
+
+Show the plot
+```{r, fig.height=15, fig.width=10}
+grid.arrange(grobs = varList, ncol = 4)
+```
+
+### Using LASSO model to select important features
+
+#### Training models
+
+Prepare clean data for feature selection
+```{r}
+inclSet<-list(RNA=rnaPCA, gen=genData, IGHV=IGHVData, 
+              drugs=viabData, seahorse = sea)
+cleanData <- generateData(inclSet, onlyCombine = TRUE, censor = 4)
+```
+
+
+Perform lasso regression
+```{r, lasso pick, cache=TRUE, warning=FALSE, message=FALSE}
+lassoResults <- list()
+for (eachMeasure in names(cleanData$allResponse)) {
+  dataResult <- list()
+  for (eachDataset in names(cleanData$allExplain[[eachMeasure]])) {
+    y <- cleanData$allResponse[[eachMeasure]]
+    X <- cleanData$allExplain[[eachMeasure]][[eachDataset]]
+  
+   
+    glmRes <- runGlm(X, y, method = "lasso", repeats = 100, folds = 3)
+    dataResult[[eachDataset]] <- glmRes 
+  }
+  lassoResults[[eachMeasure]] <- dataResult
+  
+}
+```
+
+
+### Ploting results
+
+Function for the heatmap plot
+```{r}
+lassoPlot <- function(lassoOut, cleanData, freqCut = 1, coefCut = 0.01, setNumber = "last") {
+  plotList <- list()
+  if (setNumber == "last") {
+    setNumber <- length(lassoOut[[1]])
+  } else {
+    setNumber <- setNumber
+  }
+  for (seaName in names(lassoOut)) {
+    #for the barplot on the left of the heatmap
+    barValue <- rowMeans(lassoOut[[seaName]][[setNumber]]$coefMat)
+    freqValue <- rowMeans(abs(sign(lassoOut[[seaName]][[setNumber]]$coefMat)))
+    barValue <- barValue[abs(barValue) >= coefCut & freqValue >= freqCut] # a certain threshold
+    barValue <- barValue[order(barValue)]
+    if(length(barValue) == 0) {
+      plotList[[seaName]] <- NA
+      next
+    }
+
+    #for the heatmap and scatter plot below the heatmap
+    allData <- cleanData$allExplain[[seaName]][[setNumber]]
+    seaValue <- cleanData$allResponse[[seaName]]*2 #back to Z-score
+    
+    tabValue <- allData[, names(barValue),drop=FALSE]
+    ord <- order(seaValue)
+    seaValue <- seaValue[ord]
+    tabValue <- tabValue[ord, ,drop=FALSE]
+    sampleIDs <- rownames(tabValue)
+    tabValue <- as.tibble(tabValue)
+    
+    #change scaled binary back to catagorical
+    for (eachCol in colnames(tabValue)) {
+      if (strsplit(eachCol, split = "[.]")[[1]][1] != "con") {
+        tabValue[[eachCol]] <- as.integer(as.factor(tabValue[[eachCol]]))
+      }
+      else {
+        tabValue[[eachCol]] <- tabValue[[eachCol]]*2 #back to Z-score
+      }
+    }
+    
+    tabValue$Sample <- sampleIDs
+    #Mark different rows for different scaling in heatmap
+    matValue <- gather(tabValue, key = "Var",value = "Value", -Sample)
+    matValue$Type <- "mut"
+    
+    #For continuious value
+    matValue$Type[grep("con.",matValue$Var)] <- "con"
+    
+    #for methylation_cluster
+    matValue$Type[grep("ConsCluster",matValue$Var)] <- "meth"
+    
+    #change the scale of the value, let them do not overlap with each other
+    matValue[matValue$Type == "mut",]$Value = matValue[matValue$Type == "mut",]$Value + 10
+    matValue[matValue$Type == "meth",]$Value = matValue[matValue$Type == "meth",]$Value + 20
+    
+    
+    #color scale for viability
+    idx <- matValue$Type == "con"
+    
+    myCol <- colorRampPalette(c('dark red','white','dark blue'), 
+                   space = "Lab")
+    if (sum(idx) != 0) {
+      matValue[idx,]$Value = round(matValue[idx,]$Value,digits = 2)
+      minViab <- min(matValue[idx,]$Value)
+      maxViab <- max(matValue[idx,]$Value)
+      limViab <- max(c(abs(minViab), abs(maxViab)))
+      scaleSeq1 <- round(seq(-limViab, limViab,0.01), digits=2)
+      color4viab <- setNames(myCol(length(scaleSeq1+1)), nm=scaleSeq1)
+    } else {
+      scaleSeq1 <- round(seq(0,1,0.01), digits=2)
+      color4viab <- setNames(myCol(length(scaleSeq1+1)), nm=scaleSeq1)
+    }
+    
+
+    
+    #change continues measurement to discrete measurement
+    matValue$Value <- factor(matValue$Value,levels = sort(unique(matValue$Value)))
+    
+    #change order of heatmap
+    names(barValue) <-  gsub("con.", "", names(barValue))
+    matValue$Var <- gsub("con.","",matValue$Var)
+    matValue$Var <- factor(matValue$Var, levels = names(barValue))
+    matValue$Sample <- factor(matValue$Sample, levels = names(seaValue))
+    #plot the heatmap
+    p1 <- ggplot(matValue, aes(x=Sample, y=Var)) + geom_tile(aes(fill=Value), color = "gray") + 
+      theme_bw() + scale_y_discrete(expand=c(0,0)) + theme(axis.text.y=element_text(hjust=0, size=10), axis.text.x=element_blank(), axis.ticks=element_blank(), panel.border=element_rect(colour="gainsboro"),  plot.title=element_text(size=12), panel.background=element_blank(), panel.grid.major=element_blank(), panel.grid.minor=element_blank()) + xlab("patients") + ylab("") + scale_fill_manual(name="Mutated", values=c(color4viab, `11`="gray96", `12`='black', `21`='lightgreen', `22`='green',`23` = 'green4'),guide=FALSE) + ggtitle(seaName)
+    
+    #Plot the bar plot on the left of the heatmap
+    barDF = data.frame(barValue, nm=factor(names(barValue),levels=names(barValue)))
+    
+    p2 <- ggplot(data=barDF, aes(x=nm, y=barValue)) + 
+      geom_bar(stat="identity", fill="lightblue", colour="black", position = "identity", width=.66, size=0.2) + 
+      theme_bw() + geom_hline(yintercept=0, size=0.3) + scale_x_discrete(expand=c(0,0.5)) + 
+      scale_y_continuous(expand=c(0,0)) + coord_flip(ylim=c(min(barValue),max(barValue))) + 
+      theme(panel.grid.major=element_blank(), panel.background=element_blank(), axis.ticks.y = element_blank(),
+            panel.grid.minor = element_blank(), axis.text=element_text(size=8), panel.border=element_blank()) +
+      xlab("") + ylab("") + geom_vline(xintercept=c(0.5), color="black", size=0.6)
+    
+    #Plot the scatter plot under the heatmap
+    
+    # scatterplot below
+    scatterDF = data.frame(X=factor(names(seaValue), levels=names(seaValue)), Y=seaValue)
+    
+    p3 <- ggplot(scatterDF, aes(x=X, y=Y)) + geom_point(shape=21, fill="dimgrey", colour="black", size=1.2) + theme_bw() + theme(panel.grid.minor=element_blank(), panel.grid.major.x=element_blank(), axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank(), axis.text.y=element_text(size=8), panel.border=element_rect(colour="dimgrey", size=0.1), panel.background=element_rect(fill="gray96"))
+    
+    #Scale bar for continuous variable
+
+    Vgg = ggplot(data=data.frame(x=1, y=as.numeric(names(color4viab))), aes(x=x, y=y, color=y)) + geom_point() + 
+      scale_color_gradientn(name="Z-score", colours =color4viab) + theme(legend.title=element_text(size=12), legend.text=element_text(size=10))
+    
+    #Assemble all the plots togehter
+
+    # construct the gtable
+    wdths = c(1.5, 0.2, 1.3*ncol(matValue), 1.4, 1)
+    hghts = c(0.1, 0.0015*nrow(matValue), 0.16, 0.5)
+    gt = gtable(widths=unit(wdths, "in"), heights=unit(hghts, "in"))
+    
+    ## make grobs
+    gg1 = ggplotGrob(p1)
+    gg2 = ggplotGrob(p2)
+    gg3 = ggplotGrob(p3)
+    gg4 = ggplotGrob(Vgg)
+    
+    ## fill in the gtable
+    gt = gtable_add_grob(gt, gtable_filter(gg2, "panel"), 2, 1) # add barplot
+    gt = gtable_add_grob(gt, gtable_filter(gg1, "panel"), 2, 3) # add heatmap
+    gt = gtable_add_grob(gt, gtable_filter(gg1, "title"), 1, 3) #add title to plot
+    gt = gtable_add_grob(gt, gtable_filter(gg3, "panel"), 4, 3) # add scatterplot
+    gt = gtable_add_grob(gt, gtable_filter(gg2, "axis-b"), 3, 1) # y axis for barplot
+    gt = gtable_add_grob(gt, gtable_filter(gg3, "axis-l"), 4, 2) # y axis for scatter plot
+    gt = gtable_add_grob(gt, gtable_filter(gg1, "axis-l"), 2, 4) # variable names
+    gt = gtable_add_grob(gt, gtable_filter(gg4, "guide-box"), 2, 5) # scale bar for continous variables
+
+    
+    #plot
+    #grid.draw(gt)
+    plotList[[seaName]] <- gt
+  }
+  return(plotList)
+}
+```
+
+Plot all heatmaps
+```{r}
+heatMaps <- lassoPlot(lassoResults, cleanData, freqCut = 0.8)
+```
+
+Arrange for the main figure (Figure 7)
+```{r lassoCombine, fig.height=8, fig.width=10, fig.path=plotDir, dev=c("png","pdf")}
+ggdraw() + 
+  draw_plot(varList[[1]], 0,0.6,0.25,0.4) + 
+  draw_plot(varList[[4]], 0.25,0.6,0.25,0.4) + 
+  draw_plot(varList[[6]], 0.5,0.6,0.25,0.4) + 
+  draw_plot(varList[[7]], 0.75,0.6,0.25,0.4) +
+  draw_plot(heatMaps[[1]], 0, 0, 1, 0.3 ) +
+  draw_plot(heatMaps[[6]], 0, 0.3, 1, 0.3 ) + 
+  draw_plot_label(c("A","B"), c(0,0), c(1, 0.6),size=15)
+```
+
+Plot other feature for supplementary file
+```{r allLasso, fig.height=18, fig.width=25,fig.path=plotDir, dev=c( "png","pdf")}
+allList <- list(varList[[2]], heatMaps[[2]],
+                varList[[4]], heatMaps[[4]],
+                varList[[5]], heatMaps[[5]],
+                varList[[7]], heatMaps[[7]],
+                varList[[8]], heatMaps[[8]],
+                varList[[9]], heatMaps[[9]],
+                varList[[11]], heatMaps[[11]])
+
+plot_grid(plotlist = allList, rel_widths = c(1,4,1,4),ncol = 4)                
+```
+
+## Charactersing bioligical meanings of expression PCs
+
+Prepare signature sets
+```{r, eval = TRUE}
+gmts = list(H=system.file("extdata","h.all.v5.1.symbols.gmt", package="BloodCancerMultiOmics2017"))
+```
+
+Enrichment using HALLMARK
+```{r enrich_hallmark, fig.height=16, fig.width=18, fig.path=plotDir, dev=c( "png","pdf"), eval=TRUE, warning=FALSE, message=FALSE}
+plotPC <- colnames(pcLoad)[c(2,4, 6, 8,10,11)]
+enHallmark <- lapply(plotPC, function(pc) {
+  inputTab <- data.frame(ID = rowData(dds[rownames(pcLoad),])$symbol,
+                         stat = pcLoad[,pc]) %>%
+    arrange(abs(stat)) %>% distinct(ID, .keep_all = TRUE) %>%
+    column_to_rownames("ID")
+  res <- runGSEA(inputTab = inputTab, gmtFile = gmts$H, GSAmethod = "page")
+  res$Name <- gsub("HALLMARK_","", res$Name)
+  res
+}) 
+
+names(enHallmark) <- sapply(plotPC, 
+                            function(x) paste("expression",x, collapse = ""))
+plotHallmark1 <- jyluMisc::plotEnrichmentBar(enHallmark[1:3], pCut = 0.05, setName = "", ifFDR = TRUE)
+plotHallmark2 <- jyluMisc::plotEnrichmentBar(enHallmark[4:6], pCut = 0.05, setName = "", ifFDR = TRUE)
+
+#save to pdf manually
+ggdraw() +
+  draw_plot(plotHallmark1, 0,0,0.5,1) +
+  draw_plot(plotHallmark2, 0.5,0.4,0.5,0.6)
+```

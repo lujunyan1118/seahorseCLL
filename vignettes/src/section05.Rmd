@@ -1,0 +1,834 @@
+---
+title: 'Section 5: Association between the clinical phenotype and energy metabolic features'
+author: "Junyan Lu"
+date: "`r doc_date()`"
+output:
+  BiocStyle::html_document
+---
+
+# Association between the clinical phenotype and energy metabolic features
+
+```{r, message=FALSE, include=!exists(".standalone"), eval=!exists(".standalone"), echo = FALSE}
+library(seahorseCLL)
+library(BloodCancerMultiOmics2017)
+library(SummarizedExperiment)
+library(grid)
+library(survival)
+library(gridExtra)
+library(maxstat)
+library(xtable)
+library(cowplot)
+library(ggbeeswarm)
+library(survminer)
+library(tidyverse)
+```
+
+```{r echo=FALSE}
+plotDir = ifelse(exists(".standalone"), "", "section05/")
+if(plotDir!="") if(!file.exists(plotDir)) dir.create(plotDir)
+options(stringsAsFactors=FALSE)
+```
+
+
+
+## Correlation between seahorse measurement and pretreatment status
+
+### Correlation test
+
+Load data set
+```{r}
+data("patmeta", "seaCombat","lpdAll", "pretreat","doublingTime")
+```
+
+Prepare data table for t-test
+```{r}
+testTab <- assays(seaCombat)$seaMedian %>% data.frame() %>% rownames_to_column("Measurement") %>%
+  gather(key = "patID", value = "value", -Measurement) %>%
+  mutate(pretreated = pretreat[patID,]) %>%
+  mutate(pretreated = factor(pretreated),
+         IGHV = factor(exprs(lpdAll)["IGHV Uppsala U/M",patID])) %>% 
+  as.tibble()
+```
+
+Performing t-test for each measurement
+```{r}
+tTest <- function(x, y) {
+  noNA <- !is.na(x) & !is.na(y)
+  res <- t.test(x[noNA] ~ y[noNA], equal.var = TRUE)
+  tibble(p = res$p.value,
+         dm = res$estimate[[2]] - res$estimate[[1]])
+}
+
+pTab <- group_by(testTab, Measurement) %>% do(tTest(.$value, .$pretreated)) %>% ungroup() %>%
+  mutate(p.adj = p.adjust(p, method = "BH"))
+```
+
+
+Perform ANOVA test, including IGHV as a blocking factor
+```{r}
+aovTest <- function(x,y,block) {
+  noNA <- !is.na(x) & !is.na(y) & !is.na(block)
+  dataTab <- data.frame(x = x[noNA], y = y[noNA], block = block[noNA])
+  res <- anova(lm(x ~ y + block))
+  tibble(p = res$`Pr(>F)`[1])
+}
+
+pTab.IGHV <- group_by(testTab, Measurement) %>% do(aovTest(.$value, .$pretreated, .$IGHV)) %>%
+  ungroup() %>% mutate(p.adj = p.adjust(p, method = "BH"))
+```
+
+A table as output
+```{r, results=FALSE}
+outTable <- tibble(`Seahorse mearuement` = formatSea(pTab$Measurement),
+                   `p value` = format(pTab$p, digits = 2),
+                   `adjusted p` = format(pTab$p.adj, digits = 3),
+                   `p value (IGHV blocked)` = format(pTab.IGHV$p, digits = 2),
+                   `adjusted p (IGHV blocked)` = format(pTab.IGHV$p.adj, digits = 3))
+
+write(
+print(xtable(outTable, digits = 3, 
+             caption = "Student's t-test results of energy metabolic measurements related to pretreatment status"), 
+      include.rownames=FALSE,
+      caption.placement = "top")
+,file = "section05/tTest_SeahorseVSpretreat.tex")
+```
+
+Association between IGHV status and pretreatment
+```{r}
+IGHVtab <- filter(testTab, !duplicated(patID))
+chiRes <- chisq.test(IGHVtab$pretreated, IGHVtab$IGHV)
+chiRes
+```
+
+
+
+### Plot significant associations as beeswarms plot (for supplementary figures)
+
+Plot
+```{r}
+seaList <- c("maximal.respiration", "spare.respiratory.capacity")
+plotList <- lapply(seaList, function(seaName) {
+  #prepare table for plotting
+  plotTab <- filter(testTab, Measurement == seaName) %>% 
+    mutate(Measurement = formatSea(Measurement),
+           pretreated = ifelse(pretreated ==1, 
+                               sprintf("yes (n=%s)", sum(pretreated == 1)), 
+                               sprintf("no (n=%s)", sum(pretreated == 0))),
+           IGHV = ifelse(is.na(IGHV), "unknown", 
+                         ifelse(IGHV == 1, "mutated", "unmutated"))) %>%
+    mutate(IGHV = factor(IGHV, levels = c("mutated","unmutated","unknown"))) %>%
+    filter(!is.na(value))
+  
+  #p value for annotation
+  pval <- filter(pTab, Measurement == seaName)$p
+  
+  #color for IGHV status
+  colorList <- c(mutated = "red", unmutated = "black", unknown = "grey80")
+  
+  #formatted seaname
+  seaTitle <- unique(plotTab$Measurement)
+  
+  #title 
+  plotTitle <- paste(sprintf("'%s (p = '~",seaTitle),
+                     sciPretty(pval, digits = 2),"*')'")
+  
+  ggplot(plotTab, aes(x=pretreated, y = value)) + 
+    stat_boxplot(geom = "errorbar", width = 0.3) +
+    geom_boxplot(outlier.shape = NA, col="black", width=0.4) + 
+    geom_beeswarm(cex=2, size =1, aes(col = IGHV)) + theme_classic() +
+    xlab("") + ylab("OCR (pMol/min)") + ggtitle(parse(text=plotTitle)) + 
+    scale_color_manual(values = colorList) +
+    theme(axis.line.x = element_blank(), axis.ticks.x = element_blank(),
+           axis.title = element_text(size=12, face="bold"),
+           axis.text = element_text(size=12),
+           plot.title = element_text(hjust=0.5,size=15),
+           axis.title.x = element_text(face="bold"))
+    
+})
+```
+
+Save the plot
+```{r Seahorse_vs_pretreat, fig.height=5, fig.width=12}
+grid.arrange(grobs = plotList, ncol =2)
+```
+
+## Correlation between seahorse measurement and lymphocyte doubling time
+
+### Correlation test
+
+Pre-processing data
+```{r}
+testTab <- assays(seaCombat)$seaMedian %>% data.frame() %>% rownames_to_column("Measurement") %>%
+  gather(key = "patID", value = "value", -Measurement) %>%
+  mutate(pretreated = pretreat[patID,],
+         doubling.time = LDT[patID,]) %>%
+  mutate(pretreated = factor(pretreated),
+         IGHV = factor(exprs(lpdAll)["IGHV Uppsala U/M",patID])) %>% 
+  filter(!is.na(doubling.time), !is.na(value)) %>%
+  as.tibble()
+```
+
+Correlation test between seahorse measurement and doubling time
+```{r}
+corTest <- function(x, y, block = NULL, method = "pearson") {
+  if (is.null(block)) {
+    res <- cor.test(x,y, method = method)
+    tibble(p = res$p.value, coef = res$estimate[[1]])
+  } else {
+    tab <- data.frame(x = x, y = y, block = block)
+    res <- summary(lm( y ~ x + block, tab)) #how much y can be explained by x and block
+    tibble(p = res$coefficients[2,4],
+           coef = cor(x,y))
+  }
+}
+
+corRes <- group_by(testTab, Measurement) %>% do(corTest(.$value, .$doubling.time)) %>%
+  ungroup() %>% mutate(p.adj = p.adjust(p, method = "BH"))
+```
+
+Correlations between lymphocyte doubling time and IGHV stauts
+```{r}
+pRes <- filter(testTab, !duplicated(patID)) %>% 
+  do(data.frame(p = t.test(doubling.time ~ IGHV,.)$p.value))
+pRes
+```
+
+Correlation test between seahorse measurement and doubling time
+(Considering IGHV as cofactor)
+```{r}
+corRes.aov <- group_by(testTab, Measurement) %>% filter(!is.na(IGHV)) %>%
+  do(corTest(x = .$value, y = .$doubling.time, block = .$IGHV)) %>%
+  ungroup() %>% mutate(p.adj = p.adjust(p, method = "BH"))
+```
+
+Correlation test between seahorse measurement and doubling time
+(within M-CLL)
+```{r}
+corRes.M <- group_by(testTab, Measurement) %>% filter(IGHV %in% 1) %>%
+  do(corTest(x = .$value, y = .$doubling.time)) %>%
+  ungroup() %>% mutate(p.adj = p.adjust(p, method = "BH"))
+```
+
+Correlation test between seahorse measurement and doubling time
+(within U-CLL)
+```{r}
+corRes.U <- group_by(testTab, Measurement) %>% filter(IGHV %in% 0) %>%
+  do(corTest(x = .$value, y = .$doubling.time)) %>%
+  ungroup() %>% mutate(p.adj = p.adjust(p, method = "BH"))
+```
+
+A table for output
+```{r, results=FALSE}
+outTable <- tibble(`Seahorse mearuement` = formatSea(corRes$Measurement),
+                   `p value` = format(corRes$p, digits = 2),
+                   `adjusted p` = format(corRes$p.adj, digits = 3),
+                   `p value (IGHV blocked)` = format(corRes.aov$p, digits = 3),
+                   `adjusted p (IGHV blocked)` = format(corRes.aov$p.adj, digits = 3))
+
+write(
+print(xtable(outTable, digits = 3, 
+             caption = "Correlation tests between each Seahorse measurements and lymphocyte doubling time"), 
+      include.rownames=FALSE,
+      caption.placement = "top")
+,"section05/tTest_SeahorseVSldt.tex")
+```
+
+### Plot correlations (for supplementary figure)
+
+```{r}
+seaList <- c("glycolysis", "glycolytic.capacity")
+plotList.cor <- lapply(seaList, function(seaName) {
+  #prepare table for plotting
+  plotTab <- filter(testTab, Measurement == seaName) %>% 
+    mutate(Measurement = formatSea(Measurement),
+           IGHV = ifelse(is.na(IGHV), "unknown", 
+                         ifelse(IGHV == 1, "mutated", "unmutated"))) %>%
+    mutate(IGHV = factor(IGHV, levels = c("mutated","unmutated","unknown"))) %>%
+    filter(!is.na(value), !is.na(doubling.time))
+  
+  #p value for annotation
+  pval <- filter(corRes, Measurement == seaName)$p
+  coef <- filter(corRes, Measurement == seaName)$coef
+  
+  #color for IGHV status
+  colorList <- c(mutated = "red", unmutated = "black", unknown = "grey80")
+  
+  #formatted seaname
+  seaTitle <- unique(plotTab$Measurement)
+  
+  
+  #prepare correlation test annotations
+  annoText <- paste("'coefficient ='~",format(coef,digits = 2),"*","', p ='~",sciPretty(pval,digits=2))
+  
+  ggplot(plotTab, aes(x=value,y=doubling.time)) + 
+    geom_point(size=1, aes(col = IGHV)) + 
+    geom_smooth(method = "lm", se= FALSE) +
+    xlab("ECAR (pMol/min)") + ylab("Lymphocyte doubling time (days)") +
+    theme_bw() + ggtitle(seaTitle) +
+    scale_color_manual(values = colorList) +
+    annotate("text", x = -Inf, y = Inf, label = annoText, 
+             vjust=1, hjust=0, size = 5, parse = TRUE, col= "darkred") +
+    theme(panel.grid = element_blank(),
+          axis.title = element_text(size=13, face="bold"),
+          axis.text = element_text(size=12),
+          plot.title = element_text(face="bold", hjust=0.5, size = 15 ),
+          legend.position = "none",
+          axis.title.x = element_text(face="bold"),
+          plot.margin = unit(c(0.5,0.5,0.5,0.5), "cm"))
+    
+})
+```
+
+Show the plot
+```{r Seahorse_vs_LDT, fig.height=5, fig.width=12}
+grid.arrange(grobs = plotList.cor, ncol =2)
+```
+
+Combine and save the plot
+```{r seahorse_clinics, fig.width=11, fig.height=10, fig.path=plotDir, dev=c("png", "pdf")}
+plot_grid(plotList[[1]], plotList[[2]],
+          plotList.cor[[1]], plotList.cor[[2]],labels = "AUTO")
+```
+
+## Correlation between seahorse measurement and survival
+
+### Prepare dataset
+```{r}
+seaTable <- assays(seaCombat)$seaMedian
+
+survT = patmeta[colnames(seaTable),]
+survT[which(survT[,"IGHV"]=="U") ,"IGHV"] = 0
+survT[which(survT[,"IGHV"]=="M") ,"IGHV"] = 1
+survT$IGHV = as.numeric(survT$IGHV)
+
+colnames(survT) = gsub("Age4Main", "age", colnames(survT))
+
+#add seahorse measurement information
+survT <- cbind(survT, t(seaTable))
+
+# competinting risk endpoint fpr 
+survT$compE <- ifelse(survT$treatedAfter == TRUE, 1, 0)
+survT$compE <- ifelse(survT$treatedAfter == FALSE & survT$died==TRUE,
+                      2, survT$compE )
+survT$T7  <- ifelse(survT$compE == 1, survT$T5, survT$T6 )
+```
+
+### Univariate survival analysis
+
+#### Caclulation correlations
+
+Function to calculate correlations
+```{r forest-together}
+
+com <- function( Time, endpoint, scaleX, sub, d, split, drug_names) {  
+  
+  res <- lapply(d, function(g)  { 
+  
+  #drug <- survT[,g] * scaleX
+  drug <- survT[,g]
+  #drug <- (drug - mean(drug, na.rm = TRUE))/sd(drug, na.rm=TRUE)
+  ## all=99, M-CLL=1, U-CLL=0
+  if(sub==99) { surv <- coxph(Surv(survT[,paste0(Time)],
+                                   survT[,paste0(endpoint)] == TRUE) ~ drug)} 
+  if(sub<99)  { surv <- coxph(Surv(survT[,paste0(Time)],
+                                   survT[,paste0(endpoint)] == TRUE) ~ drug,
+                              subset=survT[,paste0(split)]==sub)}    
+  
+  c(summary(surv)[[7]][,5], summary(surv)[[7]][,2], 
+                summary(surv)[[8]][,3], 
+                summary(surv)[[8]][,4])
+ })
+ s <- do.call(rbind, res)
+ colnames(s) <- c("p", "HR", "lower", "higher")
+ rownames(s) <- drug_names
+ s
+}
+```
+
+All samples
+```{r}
+d <- rownames(seaTable)
+sea_names <- formatSea(d)
+
+ttt <- com(Time="T5", endpoint="treatedAfter", sub=99, d=d,
+          split="IGHV", drug_names=sea_names, scaleX=1)
+
+   
+os <-  com(Time="T6", endpoint="died", sub=99, d=d, split="",
+          drug_names=sea_names, scaleX=1)
+
+#TTT result
+ttt
+
+#OS result
+os
+```
+
+M-CLL samples
+```{r}
+d <- rownames(seaTable)
+sea_names <- formatSea(d)
+
+ttt.M <- com(Time="T5", endpoint="treatedAfter", sub=1, d=d,
+          split="IGHV", drug_names=sea_names, scaleX=1)
+
+   
+os.M <-  com(Time="T6", endpoint="died", sub=1, d=d, 
+           split="IGHV",drug_names=sea_names, scaleX=1)
+
+#TTT result
+ttt.M
+
+#OS result
+os.M
+```
+
+
+U-CLL samples
+```{r}
+d <- rownames(seaTable)
+sea_names <- formatSea(d)
+
+ttt.U <- com(Time="T5", endpoint="treatedAfter", sub=0, d=d,
+          split="IGHV", drug_names=sea_names, scaleX=1)
+
+   
+os.U <-  com(Time="T6", endpoint="died", sub=0, d=d, 
+           split="IGHV",drug_names=sea_names, scaleX=1)
+
+#TTT result
+ttt.U
+
+#OS result
+os.U
+```
+
+#### KM plot
+
+Function for km plot
+```{r}
+#need to be fixed
+km <- function(survT, seaName, split, titlePlot, t, hr, c, pvals = NULL) { 
+  #function for km plot
+  survS <- survT
+    #filter_(survT, sprintf("!is.na(%s)",split),
+    #              sprintf("!is.na(%s)",seaName))
+  k <- survS[ , seaName]
+  
+  ms5 <- maxstat.test(Surv(T5, treatedAfter)  ~ k, 
+                             data = survS,
+                             smethod = "LogRank",
+                             minprop = 0.2, 
+                             maxprop = 0.8, 
+                             alpha = NULL)
+  ms6 <- maxstat.test(Surv(T6, died) ~ k, 
+                             data = survS,
+                             smethod = "LogRank",
+                             minprop = 0.2, 
+                             maxprop = 0.8, 
+                             alpha = NULL)
+
+  med <- median(k, na.rm = TRUE)
+  
+  # median
+  if (c=="med") {    
+   survS$cutA <- ifelse(k >= med, "high", "low")
+   survS$cutM <- ifelse(k >= med, "high", "low")
+   survS$cutU <- ifelse(k >= med, "high", "low")
+  }
+  
+  #maxstat & TTT
+  if (c=="maxstat" & t=="TTT") {    
+   survS$cutA <- ifelse(k >= ms5$estimate, "high", "low")
+   survS$cutM <- ifelse(k >= ms5$estimate, "high", "low") 
+   survS$cutU <- ifelse(k >= ms5$estimate, "high", "low")
+  }
+  
+  #OS & maxstat
+  if (c=="maxstat" & t=="OS") {    
+   survS$cutA <- ifelse(k >= ms6$estimate, "high", "low")
+   survS$cutM <- ifelse(k >= ms6$estimate, "high", "low") 
+   survS$cutU <- ifelse(k >= ms6$estimate, "high", "low")
+  }
+  
+  p <- list()  #list for storing plots
+  
+  #prepare p value annotations
+  if (is.null(pvals)){
+    pvalList <- rep(FALSE,3)
+  } else {
+    pvalList <- pvals
+  }
+  
+  #subset according to genetic factor
+  survM <- survS[survS[,split] %in% 1,]
+  survU <- survS[survS[,split] %in% 0,]
+  inputName <- formatSea(seaName)
+  if (t=="TTT") {
+         yl <- "Fraction w/o treatment"
+         #if (c=="med"){ cat(sprintf("%s median-cutpoint for TTT: %5.2f\n", inputName, median(k) ) ) } else 
+         #  { cat(sprintf("%s cutpoint for TTT: %5.2g\n", inputName, ms5$estimate )) }
+         p[[1]] <- ggsurvplot(survfit(Surv(T5, treatedAfter) ~ cutA, data = survS), 
+                              data = survS, pval = pvalList[1],
+                              ylab = yl, xlab = "Time (years)", title = inputName,
+                              legend.labs = c("high","low"), palette = c("red","blue"),
+                              ggtheme = theme(plot.title = element_text(vjust =0.5, size = 18),
+                                              axis.text = element_text(size= 15)))$plot
+         p[[2]] <- ggsurvplot(survfit(Surv(T5, treatedAfter) ~ cutM, data = survM),
+                              data = survS, pval = pvalList[2],
+                              ylab = yl, xlab = "Time (years)",
+                              title = paste(inputName, titlePlot[1], titlePlot[3]),
+                              legend.labs = c("high","low"), palette = c("red","blue"),
+                              ggtheme = theme(plot.title = element_text(vjust =0.5, size = 18),
+                                              axis.text = element_text(size= 15)))$plot
+         p[[3]] <- ggsurvplot(survfit(Surv(T5, treatedAfter) ~ cutU, data = survU),
+                              data = survS, pval = pvalList[3],
+                              ylab = yl, xlab = "Time (years)", 
+                              title = paste(inputName, titlePlot[1], titlePlot[2]),
+                              legend.labs = c("high","low"), palette = c("red","blue"),
+                              ggtheme = theme(plot.title = element_text(vjust =0.5, size = 18),
+                                              axis.text = element_text(size= 15)))$plot
+         }
+   # OS  
+   else {
+         yl <- "Fraction overall survival"
+         #if (c=="med"){ cat(sprintf("%s median-cutpoint for OS: %5.2f\n", inputName, median(k) ) ) } else 
+         #  { cat(sprintf("%s cutpoint for OS: %5.2f\n", inputName, ms6$estimate )) }
+         p[[1]] <- ggsurvplot(survfit(Surv(T5, died) ~ cutA, data = survS), data = survS,
+                              ylab = yl, xlab = "Time (years)", pval = pvalList[1],
+                              title = inputName, legend.labs = c("high","low"), palette = c("red","blue"),
+                              ggtheme = theme(plot.title = element_text(vjust =0.5, size = 18),
+                                              axis.text = element_text(size= 15)))$plot
+         p[[2]] <- ggsurvplot(survfit(Surv(T5, died) ~ cutM, data = survM), data = survM,
+                              ylab = yl, xlab = "Time (years)", pval = pvalList[2],
+                              title = paste(inputName, titlePlot[1], titlePlot[3]), 
+                              legend.labs = c("high","low"), palette = c("red","blue"),
+                              ggtheme = theme(plot.title = element_text(vjust =0.5, size = 18),
+                                              axis.text = element_text(size= 15)))$plot 
+         p[[3]] <- ggsurvplot(survfit(Surv(T5, died) ~ cutU, data = survU), data = survU,
+                              ylab = yl, xlab = "Time (years)", pval = pvalList[3],
+                              title = paste(inputName, titlePlot[1], titlePlot[2]), 
+                              legend.labs = c("high","low"), palette = c("red","blue"),
+                              ggtheme = theme(plot.title = element_text(vjust =0.5, size = 18),
+                                              axis.text = element_text(size= 15)))$plot 
+   }
+  p
+}
+```
+
+#### Using maxstat
+
+Time to next treatment (maxstat).
+```{r}
+TTTplot.maxstat <- list()
+
+for (seaName in rownames(seaCombat)) {
+  seaName.format <- formatSea(seaName)
+  pvals <- c(ttt[seaName.format ,"p"], ttt.M[seaName.format ,"p"], ttt.U[seaName.format ,"p"])
+  pvals <- sapply(pvals, function(x) {
+    sprintf("p value = %1.2f",x)
+  })
+  TTTplot.maxstat[[seaName]] <- km(survT, seaName = seaName, split = "IGHV", t="TTT",
+   titlePlot =c("(IGHV", "umutated)", "mutated)"),  hr="tr", c="maxstat", pvals = pvals)
+}
+```
+
+Overall survival (maxstat).
+```{r, fig.path=plotDir, fig.width = 10, fig.height = 3.3, dev = c("png", "pdf")}
+OSplot.maxstat <- list()
+
+for (seaName in rownames(seaCombat)) {
+  seaName.format <- formatSea(seaName)
+  pvals <- c(os[seaName.format ,"p"], os.M[seaName.format ,"p"], os.U[seaName.format ,"p"])
+  pvals <- sapply(pvals, function(x) {
+    sprintf("p value = %1.2f",x)
+  })
+  OSplot.maxstat[[seaName]] <- km(survT, seaName = seaName, split = "IGHV", t="OS",
+   titlePlot =c("(IGHV", "umutated)", "mutated)"),  hr="tr", c="maxstat", pvals = pvals)
+}
+```
+
+KM plot for all samples (not shown in manuscript)
+```{r TTT_OS_combine, fig.path=plotDir, fig.width = 12, fig.height = 8, dev = c("png", "pdf")}
+plot_grid(TTTplot.maxstat$glycolytic.reserve[[1]], TTTplot.maxstat$maximal.respiration[[1]],
+          TTTplot.maxstat$spare.respiratory.capacity[[1]],
+          OSplot.maxstat$glycolytic.capacity[[1]], OSplot.maxstat$glycolytic.reserve[[1]],
+          labels = "AUTO")
+```
+
+KM plot for IGHV stratified samples (not shown in manuscript)
+```{r TTT_OS_IGHV_UM, fig.path=plotDir, fig.width = 10, fig.height = 20, dev = c("png", "pdf")}
+plot_grid(TTTplot.maxstat$glycolytic.reserve[[2]], TTTplot.maxstat$glycolytic.reserve[[3]],
+          TTTplot.maxstat$maximal.respiration[[2]], TTTplot.maxstat$maximal.respiration[[3]],
+          TTTplot.maxstat$spare.respiratory.capacity[[2]], TTTplot.maxstat$spare.respiratory.capacity[[3]],
+          OSplot.maxstat$glycolytic.capacity[[2]], OSplot.maxstat$glycolytic.capacity[[3]],
+          OSplot.maxstat$glycolytic.reserve[[2]], OSplot.maxstat$glycolytic.reserve[[3]],
+          labels = "AUTO", ncol = 2)
+```
+
+
+#### Using median
+
+Time to next treatment (median).
+```{r}
+TTTplot.med <- list()
+
+for (seaName in rownames(seaCombat)) {
+  seaName.format <- formatSea(seaName)
+  pvals <- c(ttt[seaName.format ,"p"], ttt.M[seaName.format ,"p"], ttt.U[seaName.format ,"p"])
+  pvals <- sapply(pvals, function(x) {
+    sprintf("p value = %1.2f",x)
+  })
+  TTTplot.med[[seaName]] <- km(survT, seaName = seaName, split = "IGHV", t="TTT",
+   titlePlot =c("(IGHV", "umutated)", "mutated)"),  hr="tr", c="med", pvals = pvals)
+}
+```
+
+Overall survival (median).
+```{r}
+OSplot.med <- list()
+
+for (seaName in rownames(seaCombat)) {
+  seaName.format <- formatSea(seaName)
+  pvals <- c(os[seaName.format ,"p"], os.M[seaName.format ,"p"], os.U[seaName.format ,"p"])
+  pvals <- sapply(pvals, function(x) {
+    sprintf("p value = %1.2f",x)
+  })
+  OSplot.med[[seaName]] <- km(survT, seaName = seaName, split = "IGHV", t="OS",
+   titlePlot =c("(IGHV", "umutated)", "mutated)"),  hr="tr", c="med", pvals = pvals)
+}
+```
+
+KM plot for all samples (Figure 6)
+```{r TTT_OS_combine_median, fig.path=plotDir, fig.width = 12, fig.height = 8, dev = c("png", "pdf")}
+plot_grid(TTTplot.med$glycolytic.reserve[[1]], TTTplot.med$maximal.respiration[[1]],
+          TTTplot.med$spare.respiratory.capacity[[1]],
+          OSplot.med$glycolytic.capacity[[1]], OSplot.med$glycolytic.reserve[[1]],
+          labels = "AUTO")
+```
+
+KM plot for IGHV stratified samples (not shown in manuscript)
+```{r TTT_OS_IGHV_UM_median, fig.path=plotDir, fig.width = 10, fig.height = 20, dev = c("png", "pdf")}
+plot_grid(TTTplot.med$glycolytic.reserve[[2]], TTTplot.med$glycolytic.reserve[[3]],
+          TTTplot.med$maximal.respiration[[2]], TTTplot.med$maximal.respiration[[3]],
+          TTTplot.med$spare.respiratory.capacity[[2]], TTTplot.med$spare.respiratory.capacity[[3]],
+          OSplot.med$glycolytic.capacity[[2]], OSplot.med$glycolytic.capacity[[3]],
+          OSplot.med$glycolytic.reserve[[2]], OSplot.med$glycolytic.reserve[[3]],
+          labels = "AUTO", ncol = 2)
+```
+
+
+## Multi-variate cox model
+
+### Prepare dataset
+```{r}
+seaTable <- assays(seaCombat)$seaMedian
+
+survT = patmeta[colnames(seaTable),]
+survT[which(survT[,"IGHV"]=="U") ,"IGHV"] = 0
+survT[which(survT[,"IGHV"]=="M") ,"IGHV"] = 1
+survT$IGHV = as.numeric(survT$IGHV)
+
+colnames(survT) = gsub("Age4Main", "age", colnames(survT))
+
+#add seahorse measurement information
+
+survT <- cbind(survT, t(mscale(seaTable)))
+
+# competinting risk endpoint fpr 
+survT$compE <- ifelse(survT$treatedAfter == TRUE, 1, 0)
+survT$compE <- ifelse(survT$treatedAfter == FALSE & survT$died==TRUE,
+                      2, survT$compE )
+survT$T7  <- ifelse(survT$compE == 1, survT$T5, survT$T6 )
+
+#genetic variants
+survT$SF3B1      <- exprs(lpdAll)[ "SF3B1",      rownames(survT)  ]
+survT$NOTCH1     <- exprs(lpdAll)[ "NOTCH1",     rownames(survT)  ]
+survT$BRAF       <- exprs(lpdAll)[ "BRAF",       rownames(survT)  ]
+survT$TP53       <- exprs(lpdAll)[ "TP53",       rownames(survT)  ]
+survT$del17p13   <- exprs(lpdAll)[ "del17p13",   rownames(survT)  ]
+survT$del11q22.3 <- exprs(lpdAll)[ "del11q22.3", rownames(survT)  ]
+survT$trisomy12 <-  exprs(lpdAll)[ "trisomy12", rownames(survT)  ]
+```
+
+```{r extract}
+extractSome <- function(x) {
+  sumsu <- summary(x)
+  data.frame(
+    `p-value`      = 
+      sprintf("%6.3g", sumsu[["coefficients"]][, "Pr(>|z|)"]),
+    `HR`           = 
+      sprintf("%6.3g", signif( sumsu[["coefficients"]][, "exp(coef)"], 2) ), 
+    `lower 95% CI` = 
+      sprintf("%6.3g", signif( sumsu[["conf.int"]][, "lower .95"], 2) ),
+    `upper 95% CI` = 
+      sprintf("%6.3g", signif( sumsu[["conf.int"]][, "upper .95"], 2),
+              check.names = FALSE) )
+}
+```
+
+Define covariates and effects.
+```{r covariates, echo=FALSE}
+survT$age <- survT$age/10
+survT$IC50beforeTreatment <- ifelse(survT$IC50beforeTreatment==TRUE, 1, 0)
+survT$IGHVwt <- ifelse(survT$IGHV==1, 0, 1)
+```
+
+#### TTT
+
+glycolytic reserve 
+```{r}
+surv1 <- coxph(
+  Surv(T5, treatedAfter) ~  
+    age +
+    as.factor(IC50beforeTreatment) +
+    as.factor(trisomy12) +
+    as.factor(del11q22.3) +
+    as.factor(del17p13) +
+    as.factor(TP53) +
+    IGHVwt +
+    glycolytic.reserve,       # continuous
+  data = survT )
+
+colFactor <- data.frame(factor = c("age", "pretreatment", 
+                                   "trisomy12", "del11q22.3", 
+                                   "del17p13","TP53","U-CLL",
+                                   "glycolytic reserve"))
+
+outTab <- cbind(colFactor,extractSome(surv1))
+
+write(print(xtable(outTab,
+            caption = "Multivariate Cox regression model for time to treatment with glycolytic reserve as a covariate"), 
+      include.rownames=FALSE,
+      caption.placement = "top"), file = "section05/glyRes_TTT.tex")
+
+
+cat(sprintf("%s patients considerd in the model; number of events %1g\n", 
+            summary(surv1)$n, summary(surv1)[6] ) )
+```
+
+maximal respiration 
+```{r}
+surv1 <- coxph(
+  Surv(T5, treatedAfter) ~  
+    age +
+    as.factor(IC50beforeTreatment) +
+    as.factor(trisomy12) +
+    as.factor(del11q22.3) +
+    as.factor(del17p13) +
+    as.factor(TP53) +
+    IGHVwt +
+    maximal.respiration,       # continuous
+  data = survT )
+
+colFactor <- data.frame(factor = c("age", "pretreatment", 
+                                   "trisomy12", "del11q22.3", 
+                                   "del17p13","TP53","U-CLL",
+                                   "maximal respiration"))
+
+outTab <- cbind(colFactor,extractSome(surv1))
+
+write(print(xtable(outTab,
+            caption = "Multivariate Cox regression model for time to treatment with maximal respiration as a covariate"), 
+      include.rownames=FALSE,
+      caption.placement = "top"), file = "section05/maxRes_TTT.tex")
+
+
+cat(sprintf("%s patients considerd in the model; number of events %1g\n", 
+            summary(surv1)$n, summary(surv1)[6] ) )
+```
+
+spare respiratory capacity
+```{r}
+surv1 <- coxph(
+  Surv(T5, treatedAfter) ~  
+    age +
+    as.factor(IC50beforeTreatment) +
+    as.factor(trisomy12) +
+    as.factor(del11q22.3) +
+    as.factor(del17p13) +
+    as.factor(TP53) +
+    IGHVwt +
+    spare.respiratory.capacity,       # continuous
+  data = survT )
+
+colFactor <- data.frame(factor = c("age", "pretreatment", 
+                                   "trisomy12", "del11q22.3", 
+                                   "del17p13","TP53","U-CLL",
+                                   "spare.respiratory.capacity"))
+
+outTab <- cbind(colFactor,extractSome(surv1))
+
+write(print(xtable(outTab,
+            caption = "Multivariate Cox regression model for time to treatment with glycolytic reserve as a covariate"), 
+      include.rownames=FALSE,
+      caption.placement = "top"), file = "section05/spResCap_TTT.tex")
+
+
+cat(sprintf("%s patients considerd in the model; number of events %1g\n", 
+            summary(surv1)$n, summary(surv1)[6] ) )
+```
+
+### OS
+
+glycolytic reserve 
+```{r}
+surv1 <- coxph(
+  Surv(T6, died) ~  
+    age +
+    as.factor(IC50beforeTreatment) +
+    as.factor(trisomy12) +
+    as.factor(del11q22.3) +
+    as.factor(del17p13) +
+    as.factor(TP53) +
+    IGHVwt +
+    glycolytic.reserve,       # continuous
+  data = survT )
+
+colFactor <- data.frame(factor = c("age", "pretreatment", 
+                                   "trisomy12", "del11q22.3", 
+                                   "del17p13","TP53","U-CLL",
+                                   "glycolytic reserve"))
+
+outTab <- cbind(colFactor,extractSome(surv1))
+
+write(print(xtable(outTab,
+            caption = "Multivariate Cox regression model for overall survival with glycolytic reserve as a covariate"), 
+      include.rownames=FALSE,
+      caption.placement = "top"), file = "section05/glyRes_OS.tex")
+
+
+cat(sprintf("%s patients considerd in the model; number of events %1g\n", 
+            summary(surv1)$n, summary(surv1)[6] ) )
+```
+
+glycolytic capacity 
+```{r}
+surv1 <- coxph(
+  Surv(T6, died) ~  
+    age +
+    as.factor(IC50beforeTreatment) +
+    as.factor(trisomy12) +
+    as.factor(del11q22.3) +
+    as.factor(del17p13) +
+    as.factor(TP53) +
+    IGHVwt +
+    glycolytic.capacity,       # continuous
+  data = survT )
+
+colFactor <- data.frame(factor = c("age", "pretreatment", 
+                                   "trisomy12", "del11q22.3", 
+                                   "del17p13","TP53","U-CLL",
+                                   "glycolytic capacity"))
+
+outTab <- cbind(colFactor,extractSome(surv1))
+
+write(print(xtable(outTab,
+            caption = "Multivariate Cox regression model for overall survival with glycolytic capacity as a covariate"), 
+      include.rownames=FALSE,
+      caption.placement = "top"), file = "section05/glyCap_OS.tex")
+
+
+cat(sprintf("%s patients considerd in the model; number of events %1g\n", 
+            summary(surv1)$n, summary(surv1)[6] ) )
+```
