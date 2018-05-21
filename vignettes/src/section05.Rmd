@@ -286,8 +286,8 @@ grid.arrange(grobs = plotList.cor, ncol =2)
 
 Combine and save the plot
 ```{r seahorse_clinics, fig.width=11, fig.height=10, fig.path=plotDir, dev=c("png", "pdf")}
-plot_grid(plotList[[1]], plotList[[2]],
-          plotList.cor[[1]], plotList.cor[[2]],labels = "AUTO")
+plot_grid(plotList.cor[[1]], plotList.cor[[2]],
+          plotList[[1]], plotList[[2]],labels = "AUTO")
 ```
 
 ## Correlation between seahorse measurement and survival
