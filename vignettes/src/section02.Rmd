@@ -57,7 +57,7 @@ seaSub <- t(assays(seaOri[,seaMain])$seaMedian)
 Get patient genetic background 
 ```{r}
 #extract genetic background information
-genBack <- exprs(lpdCLL)[fData(lpdCLL)$type %in%
+genBack <- Biobase::exprs(lpdCLL)[fData(lpdCLL)$type %in%
                           c("gen","Methylation_Cluster","IGHV"), seaMain]  
 
 genBack <- genBack[! rownames(genBack) %in% 
@@ -268,13 +268,15 @@ gList <- lapply(seq(1,nrow(p.tab.sig)), function(i) {
 ```
 
 Combine p value scatter plot and beeswarm plots (Figure 2)
-```{r  seaVSgene, fig.path=plotDir, dev=c("png", "pdf"), fig.width=13, fig.height=8}
-ggdraw() +
+```{r  seaVSgene, fig.path=plotDir, dev=c("png", "pdf"), fig.width=12, fig.height=8}
+title = ggdraw() + draw_figure_label("Figure 2", fontface = "bold", position = "top.left",size=20)
+p <- ggdraw() +
   draw_plot(p, 0, 0, 0.6, 1) +
   draw_plot(gList[[13]], 0.6, 0 , .4, .48) +
   draw_plot(gList[[15]], 0.6, 0.5 , .4, .48) +
   draw_plot_label(c("A", "B", "C"), 
                   c(0, 0.58, 0.58), c(1, 1, 0.5), size = 20)
+plot_grid(title, p, rel_heights = c(0.05,0.95), ncol = 1)
 ```
 
 Plot the rest in a separate pdf file (For supplementary figure)

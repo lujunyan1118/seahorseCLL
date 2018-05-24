@@ -17,6 +17,7 @@ library(gridExtra)
 library(cowplot)
 library(robustbase)
 library(tidyverse)
+library(Biobase)
 ```
 
 ```{r echo=FALSE}
@@ -59,7 +60,7 @@ Get drug response data
 ```{r}
 # get drug responsee data
 get.drugresp <- function(lpd) {
-  drugresp = t(exprs(lpd[fData(lpd)$type == 'viab'])) %>%
+  drugresp = t(Biobase::exprs(lpd[fData(lpd)$type == 'viab'])) %>%
     tbl_df %>% dplyr::select(-ends_with(":5")) %>%
     dplyr::mutate(ID = colnames(lpd)) %>%
     tidyr::gather(drugconc, viab, -ID) %>%
@@ -81,7 +82,7 @@ get.medp <- function(drugresp) {
   med.p = lapply(unique(tab$drug), function(n) {
     tb = filter(tab, drug == n) %>% ungroup() %>% select(-(drug:conc)) %>% 
       as.matrix %>% `rownames<-`(1:5)
-    mdp = stats::medpolish(tb)
+    mdp = stats::medpolish(tb, trace.iter = FALSE)
     df = as.data.frame(mdp$col) + mdp$overall
     colnames(df) <- n
     df
@@ -164,7 +165,7 @@ resTab.noBlock %>% filter(p.adj <= 0.1) %>% filter(!duplicated(drug)) %>% nrow()
 Calculate correlation coefficient and p values
 ```{r}
 #get IGHV stauts
-ighv <- exprs(lpdAll)["IGHV Uppsala U/M",]
+ighv <- Biobase::exprs(lpdAll)["IGHV Uppsala U/M",]
 ighv <-ighv[!is.na(ighv)]
 
 
@@ -194,7 +195,7 @@ ggplot(resTab.noBlock, aes(x=coef)) + geom_histogram(binwidth = 0.05, col = "dar
 
 ## P-value scatter plot
 
-### Correlation test with blocking for IGHV status (Figure 4)
+### Correlation test with blocking for IGHV status (Supplementary Figure)
 
 Preocess table for plotting
 ```{r}
@@ -243,7 +244,7 @@ p <- ggplot(data = plotTab, aes(x = drug,y=-log10(p), fill = seahorse, color = s
 plot(p)
 ```
 
-### Correlation test without blocking for IGHV status (Supplementary Figure)
+### Correlation test without blocking for IGHV status ( Figure 4)
 
 Preocess table for plotting
 ```{r}
@@ -285,10 +286,13 @@ p <- ggplot(data = plotTab, aes(x = drug,y=-log10(p), fill = seahorse, color = s
   geom_hline(yintercept = -log10(fdrCut), linetype="dotted") + 
   ylab(expression(-log[10]*'('*p~value*')')) + xlab("") + theme_bw() + 
   scale_shape_manual(values = c(positive = 24, negative = 25)) +
+  ggtitle("Figure 4") +
   theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust = 1,size=15),
         axis.text.y = element_text(size=15),
-        axis.title = element_text(size =15, face = "bold")) +
-  guides(fill="none", color = guide_legend(title = "Measurement"))
+        axis.title = element_text(size =15, face = "bold"),
+        plot.title = element_text(size=20, face = "bold")) +
+  guides(fill="none", color = guide_legend(title = "Measurement")) 
+
 
 plot(p)
 ```
@@ -354,10 +358,12 @@ names(scatterList) <- paste0(resTab.sig$seahorse, "_", resTab.sig$drug)
 
 A figure of selected drugs (Figure 5)
 ```{r seaVSdrug_Scatter, fig.path=plotDir, dev=c("png", "pdf"), fig.height=8, fig.width=8}
-plot_grid(scatterList$glycolysis_rotenone, 
+title = ggdraw() + draw_figure_label("Figure 5", fontface = "bold", position = "top.left",size=20)
+p <- plot_grid(scatterList$glycolysis_rotenone, 
           scatterList$glycolysis_venetoclax,
           scatterList$glycolytic.capacity_orlistat,
           scatterList$`ECAR_KX2-391`,ncol=2)
+plot_grid(title, p, rel_heights = c(0.05,0.95), ncol = 1)
 ```
 
 
@@ -411,7 +417,7 @@ fData(lpdSub)$conc <- sapply(seq(1,nrow(lpdSub)), function(i) {
   conctab[fData(lpdSub)[i,]$id, paste0("c",fData(lpdSub)[i,]$subtype)]
 })
 
-viabTab <- data.frame(exprs(lpdSub)) %>% rownames_to_column("drugID") %>% 
+viabTab <- data.frame(Biobase::exprs(lpdSub)) %>% rownames_to_column("drugID") %>% 
   gather(key = "patID", value = "viab", -drugID) %>% as_tibble() %>%
   mutate(conc = fData(lpdSub)[drugID,]$conc,
          name = fData(lpdSub)[drugID,]$name) %>%

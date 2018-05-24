@@ -156,7 +156,9 @@ beePlot <- grid.arrange(grobs = gList, ncol=2)
 
 Combine the PCA plot and beeswarm plots (Figure 1)
 ```{r normalVScll, fig.path=plotDir, dev=c("png", "pdf"), fig.width=12, fig.height=6}
-plot_grid(pcaPlot, beePlot, labels= c("A","B"), rel_widths = c(1,1))
+title = ggdraw() + draw_figure_label("Figure 1", fontface = "bold", position = "top.left",size=20)
+p <- plot_grid(pcaPlot, beePlot, labels= c("A","B"), rel_widths = c(1,1), label_size = 20)
+plot_grid(title, p, rel_heights = c(0.05,0.95), ncol = 1)
 ```
 
 

@@ -48,9 +48,6 @@ dds <- estimateSizeFactors(dds)
 
 #only choose CLL samples with IGHV annotations and have been used in seahorse experiments
 ddsCLL <- dds[,dds$diag == "CLL" & !is.na(dds$IGHV) & dds$PatID %in% colnames(seaOri)]
-
-#how many samples do we have?
-ncol(ddsCLL)
 ```
 
 Filter genes
@@ -205,9 +202,11 @@ beePlot <- ggplot(plotTab, aes(x=IGHV, y = value)) +
 
 ### Combined plots for manuscript (Figure 3)
 ```{r expressionIGHV, fig.height=6, fig.width=10, fig.path=plotDir, dev=c("png", "pdf")}
-ggdraw() + 
+title = ggdraw() + draw_figure_label("Figure 3", fontface = "bold", position = "top.left",size=20)
+p <- ggdraw() + 
   draw_plot(enBar, 0, 0.5, 0.5, 0.45) + 
   draw_plot(hallHeatmap, 0.5, 0, 0.5, 0.95) +
   draw_plot(beePlot, 0, 0, 0.5, 0.4) +
   draw_plot_label(c("A","B","C"), c(0, 0.5, 0), c(1, 1, 0.45), fontface = "plain", size=20)
+plot_grid(title, p, rel_heights = c(0.05,0.95), ncol = 1)
 ```
