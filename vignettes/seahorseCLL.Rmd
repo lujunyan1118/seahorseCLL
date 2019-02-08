@@ -11,18 +11,11 @@ output:
 
 # Introduction
 
-This package contains the data of bioenergetic features of 152 CLL samples and 9 B cell samples, measured by Seahorse extracellular flux assay. This package also reproduces figures presented in the paper "Energy metabolism influences drug sensitivity and is co-determined by genetic variants in CLL" by Lu J, Böttcher M et al.
+This package contains the data of bioenergetic features of 140 CLL samples and 9 B cell samples, measured by Seahorse extracellular flux assay. This package also reproduces figures presented in the paper "Energy metabolism is co-determined by genetic variants in chronic lymphocytic leukemia and influences drug sensitivity" by Lu J, Böttcher M et al.
 
 ***
 
-In this vignette we present the integrative analysis of CLL bioenergetic data set and the source code for the paper
-
-<br />
-
-*This vignette was put together by Junyan Lu*
-
-<br />
-
+In this vignette we present the integrative analysis of CLL bioenergetic data set and the source code for the paper.  
 
 This vignette is build from the sub-vignettes, which each can be build separatelly. The parts are separated by the horizontal lines. Each part finishes with removal of all the created objects.
 
@@ -43,6 +36,9 @@ library(gridExtra)
 library(grid)
 library(genefilter)
 library(pheatmap)
+library(ggrepel)
+library(GEOquery)
+library(limma)
 library(robustbase)
 library(DESeq2)
 library(survival)

@@ -626,7 +626,7 @@ heatMaps <- lassoPlot(lassoResults, cleanData, freqCut = 0.8)
 
 Arrange for the main figure (Figure 7)
 ```{r lassoCombine, fig.height=9, fig.width=10, fig.path=plotDir, dev=c("png","pdf")}
-title = ggdraw() + draw_figure_label("Figure 7", fontface = "bold", position = "top.left",size=20)
+title = ggdraw() + draw_figure_label("Figure 6", fontface = "bold", position = "top.left",size=20)
 p <- ggdraw() + 
   draw_plot(varList[[1]], 0,0.6,0.25,0.4) + 
   draw_plot(varList[[4]], 0.25,0.6,0.25,0.4) + 
@@ -655,12 +655,13 @@ plot_grid(plotlist = allList, rel_widths = c(1,4,1,4),ncol = 4)
 
 Prepare signature sets
 ```{r, eval = TRUE}
-gmts = list(H=system.file("extdata","h.all.v5.1.symbols.gmt", package="BloodCancerMultiOmics2017"))
+gmts = list(H=system.file("extdata","h.all.v5.1.symbols.gmt", package="BloodCancerMultiOmics2017"),
+            KEGG=system.file("extdata","c2.cp.kegg.v5.1.symbols.gmt", package = "BloodCancerMultiOmics2017"))
 ```
 
 Enrichment using HALLMARK
 ```{r enrich_hallmark, fig.height=16, fig.width=18, fig.path=plotDir, dev=c( "png","pdf"), eval=TRUE, warning=FALSE, message=FALSE}
-plotPC <- colnames(pcLoad)[c(2,4, 6, 8,10,11)]
+plotPC <- colnames(pcLoad)[c(2,3, 4, 6, 8,10,11,15)]
 enHallmark <- lapply(plotPC, function(pc) {
   inputTab <- data.frame(ID = rowData(dds[rownames(pcLoad),])$symbol,
                          stat = pcLoad[,pc]) %>%
@@ -673,11 +674,36 @@ enHallmark <- lapply(plotPC, function(pc) {
 
 names(enHallmark) <- sapply(plotPC, 
                             function(x) paste("expression",x, collapse = ""))
-plotHallmark1 <- jyluMisc::plotEnrichmentBar(enHallmark[1:3], pCut = 0.05, setName = "", ifFDR = TRUE)
-plotHallmark2 <- jyluMisc::plotEnrichmentBar(enHallmark[4:6], pCut = 0.05, setName = "", ifFDR = TRUE)
+plotHallmark1 <- jyluMisc::plotEnrichmentBar(enHallmark[1:4], pCut = 0.05, setName = "", ifFDR = TRUE)
+plotHallmark2 <- jyluMisc::plotEnrichmentBar(enHallmark[5:8], pCut = 0.05, setName = "", ifFDR = TRUE)
 
 #save to pdf manually
 ggdraw() +
   draw_plot(plotHallmark1, 0,0,0.5,1) +
   draw_plot(plotHallmark2, 0.5,0.4,0.5,0.6)
 ```
+
+Enrichment using KEGG
+```{r enrich_KEGG, fig.height=16, fig.width=18, fig.path=plotDir, dev=c( "png","pdf"), eval=TRUE, warning=FALSE, message=FALSE}
+plotPC <- colnames(pcLoad)[c(2,3, 4, 6, 8,10,11,15)]
+enHallmark <- lapply(plotPC, function(pc) {
+  inputTab <- data.frame(ID = rowData(dds[rownames(pcLoad),])$symbol,
+                         stat = pcLoad[,pc]) %>%
+    arrange(abs(stat)) %>% distinct(ID, .keep_all = TRUE) %>%
+    column_to_rownames("ID")
+  res <- runGSEA(inputTab = inputTab, gmtFile = gmts$KEGG, GSAmethod = "page")
+  res$Name <- gsub("KEGG_","", res$Name)
+  res
+}) 
+
+names(enHallmark) <- sapply(plotPC, 
+                            function(x) paste("expression",x, collapse = ""))
+plotHallmark1 <- jyluMisc::plotEnrichmentBar(enHallmark[1:4], pCut = 0.05, setName = "", ifFDR = TRUE)
+plotHallmark2 <- jyluMisc::plotEnrichmentBar(enHallmark[5:8], pCut = 0.05, setName = "", ifFDR = TRUE)
+
+#save to pdf manually
+ggdraw() +
+  draw_plot(plotHallmark1, 0,0,0.5,1) +
+  draw_plot(plotHallmark2, 0.5,0.4,0.5,0.6)
+```
+

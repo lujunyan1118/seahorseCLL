@@ -1,5 +1,5 @@
 ---
-title: 'Section 1: Comparison between normal B cell and CLL cells'
+title: 'Section 1: Comparison between normal B cells and CLL cells'
 author: "Junyan Lu"
 date: "`r doc_date()`"
 output:
@@ -8,7 +8,7 @@ output:
 
 # Comparison between normal B cell and CLL cells
 
-```{r, message=FALSE, include=!exists(".standalone"), eval=!exists(".standalone"),echo=FALSE}
+```{r, message=FALSE, include=!exists(".standalone"), eval=!exists(".standalone"),echo=FALSE, warning=FALSE}
 library(seahorseCLL)
 library(BloodCancerMultiOmics2017)
 library(SummarizedExperiment)
@@ -106,9 +106,9 @@ expTab <- pTab %>% ungroup() %>% mutate(measure = gsub("\\."," ",measure)) %>%
   mutate(p = pTab.aov$p,  `adjusted p` = pTab.aov$p.adj) %>%
   select(-p.adj)
 expTab[expTab$`Seahorse measurement` == "ECAR OCR ratio", 1] <- "ECAR/OCR"
-fileConn <- file("section01/tTest_BcellVSCLL.tex")
+fileConn <- file(paste0(plotDir,"tTest_BcellVSCLL.tex"))
 writeLines(print(xtable(expTab, digits = 3, 
-             caption = "ANOVA test results of energy metabolic measurements between CLL cells and normal B cells "), 
+             caption = "ANOVA test results (adjusted for batch effect) of bioenergetic features between CLL cells and normal B cells "), 
       include.rownames=FALSE,
       caption.placement = "top"), fileConn)
 close(fileConn)
@@ -119,7 +119,7 @@ Beeswarms plot for select measurement
 measureList <- c("basal.respiration","glycolysis","ATP.production","glycolytic.capacity","maximal.respiration","glycolytic.reserve")
 gList <- lapply(measureList, function(seaName) {
   
-  plotTab <- filter(seaTab, measure == seaName, !is.na(value))
+  plotTab <- filter(seaTab, measure == seaName)
   pval <- filter(pTab.aov, measure == seaName )$p
   
     
@@ -134,8 +134,10 @@ gList <- lapply(measureList, function(seaName) {
   
   #plot title
   #plotTitle <- sprintf("p value = %s", format(pval, digits = 2, scientific = TRUE))
-    plotTitle <- paste(sprintf("'%s (p = '~",seaName),
+  plotTitle <- paste(sprintf("'%s (p = '~",seaName),
                      sciPretty(pval, digits = 2),"*')'")
+  
+
   ggplot(plotTab, aes(x=type, y = value)) + 
        stat_boxplot(geom = "errorbar", width = 0.3) +
        geom_boxplot(outlier.shape = NA, col="black", width=0.4) + 
@@ -157,7 +159,7 @@ beePlot <- grid.arrange(grobs = gList, ncol=2)
 Combine the PCA plot and beeswarm plots (Figure 1)
 ```{r normalVScll, fig.path=plotDir, dev=c("png", "pdf"), fig.width=12, fig.height=6}
 title = ggdraw() + draw_figure_label("Figure 1", fontface = "bold", position = "top.left",size=20)
-p <- plot_grid(pcaPlot, beePlot, labels= c("A","B"), rel_widths = c(1,1), label_size = 20)
+p <- plot_grid(pcaPlot, beePlot, labels= c("A","B"), rel_widths = c(1,1), label_size = 22)
 plot_grid(title, p, rel_heights = c(0.05,0.95), ncol = 1)
 ```
 
